@@ -31,8 +31,10 @@
   断线自动退化为轮询
 - **选择性同步**（FR-S9）：`ysync add --exclude <子树>`（可多次）
 - **限速**（FR-S12）：配置 `upload_limit_kbs` / `download_limit_kbs`（token bucket）
-- **daemon 控制 API + 状态页**：默认 `127.0.0.1:8730`，浏览器打开即见各文件夹状态/
-  冲突/错误并可暂停/恢复（`-http off` 关闭）
+- **daemon 控制 API + Web 管理台**：默认 `127.0.0.1:8730`（token 认证，每次启动随机
+  生成），支持：查看各文件夹状态/冲突/错误、暂停/恢复、立即同步、**从网页接入/移除
+  文件夹**（含 exclude/use-gitignore）、**冲突处理**（保留当前 / 采用副本，处理为纯
+  文件操作并自动同步传播）。`ysync ui` 一键在浏览器打开（`-http off` 关闭）
 - **开机自启**：`ysync install` 生成 launchd（macOS）/ systemd user unit（Linux）
 - **backup**（SR5）：`y-sync-server backup -out DIR` 输出一致性快照（SQLite VACUUM INTO
   + 全部 blob），放回数据目录即可恢复
@@ -116,9 +118,12 @@ scripts/e2e.sh       端到端验证（53 项断言）
 
 ```bash
 go test ./...          # ignore 匹配器等单元测试
-bash scripts/e2e.sh    # 53 项端到端断言（同步/冲突/移动/回收站/版本/分块/
-                       # 崩溃恢复/嵌套 ignore/状态页/分享/WebDAV/backup）
+bash scripts/e2e.sh    # 76 项端到端断言（同步/冲突/移动/回收站/版本/分块/
+                       # 崩溃恢复/嵌套 ignore/选择性同步/use-gitignore/WS 准实时/
+                       # 管理台 API/冲突处理/暂停恢复/分享/WebDAV/backup）
 ```
+
+e2e 提供 `wait_for` 轮询助手消除时序脆弱性；`E2E_KEEP=1` 保留现场目录供排查。
 
 ## 实现状态对照（REQUIREMENTS.md §8）
 
@@ -127,7 +132,7 @@ bash scripts/e2e.sh    # 53 项端到端断言（同步/冲突/移动/回收站/
 | M0 协议定稿 | ✅ protocol 包 + e2e 脚本即协议一致性验证 |
 | M1 最小闭环 | ✅ 双向同步/多文件夹/冲突副本/断连恢复 |
 | M2 可靠性 | ✅ 移动传播/回收站/版本/嵌套 ignore/分块续传/FS 事件/崩溃恢复 |
-| M3 体验 | ✅ 选择性同步/限速/WS 通知/状态页/自启/backup（原生托盘 GUI 以 Web 状态页代替，Tauri 壳留待后续评估） |
+| M3 体验 | ✅ 选择性同步/限速/WS 通知/自启/backup/Web 管理台（状态监控 + 接入文件夹/处理冲突/暂停恢复；原生托盘壳以 Web 管理台代替，Tauri 留待评估） |
 | M4 扩展 | ✅ 分享链接/只读 WebDAV/浏览页（移动端评估：协议已具备弱网要素——增量+续传，原生 App 另行立项） |
 
 ## 已知限制

@@ -41,6 +41,10 @@ func main() {
 		err = cmdShares()
 	case "unshare":
 		err = cmdUnshare(os.Args[2:])
+	case "ui":
+		err = cmdUI()
+	case "remove":
+		err = cmdRemove(os.Args[2:])
 	case "install":
 		err = cmdInstall(os.Args[2:])
 	case "uninstall":
@@ -69,6 +73,8 @@ func usage() {
   ysync versions list|restore <folder> <path>   文件版本（FR-V1）
   ysync share   <folder> <path> [-hours N] [-password pw]   只读分享（FR-H1）
   ysync shares / ysync unshare <token>          分享管理
+  ysync ui                                      打开本地管理台（浏览器）
+  ysync remove  <name>                          解除跟踪文件夹（保留副本）
   ysync install / uninstall                     开机自启（launchd/systemd）
   ysync version
 `)
@@ -110,14 +116,15 @@ func cmdInit(args []string) error {
 
 func cmdAdd(args []string) error {
 	// Go flag 不支持 flag-after-arg：手动把 flag 与位置参数分开
+	valueFlags := map[string]bool{"-as": true, "--as": true, "-exclude": true, "--exclude": true}
 	var positional []string
 	var flagArgs []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "-as" || args[i] == "--as" {
+		if valueFlags[args[i]] {
 			if i+1 >= len(args) {
-				return fmt.Errorf("-as 需要参数")
+				return fmt.Errorf("%s 需要参数", args[i])
 			}
-			flagArgs = append(flagArgs, "-as", args[i+1])
+			flagArgs = append(flagArgs, args[i], args[i+1])
 			i++
 			continue
 		}
@@ -222,7 +229,7 @@ func cmdDaemon(log *slog.Logger, args []string) error {
 	fs := flag.NewFlagSet("daemon", flag.ExitOnError)
 	interval := fs.Duration("interval", 3*time.Second, "轮询间隔（兜底）")
 	only := fs.String("only", "", "仅同步指定文件夹")
-	httpAddr := fs.String("http", "127.0.0.1:8730", "本地控制 API/状态页地址（off 关闭）")
+	httpAddr := fs.String("http", "127.0.0.1:8730", "本地控制 API/管理页地址（off 关闭）")
 	reconcile := fs.Duration("reconcile", 5*time.Minute, "全量对账间隔（防事件丢失）")
 	fs.Parse(args)
 
@@ -231,107 +238,18 @@ func cmdDaemon(log *slog.Logger, args []string) error {
 		return err
 	}
 	cfg.Defaults()
-	api := client.NewAPI(cfg.ServerURL, cfg.Token)
-	eng := &client.Engine{Cfg: cfg, API: api, Log: log}
-	state := client.NewDaemonState()
-	state.InitFolders(cfg.Folders)
-
-	syncOne := func(f *client.Folder) {
-		if !state.BeginSync(f.Name) {
-			return // 已暂停（M3）
-		}
-		stats, err := eng.SyncFolder(f)
-		if err != nil {
-			log.Error("sync failed", "folder", f.Name, "err", err)
-			state.FailSync(f, err)
-			return
-		}
-		if stats.Uploaded+stats.Downloaded+stats.Moved+stats.Deleted+stats.Conflicts > 0 {
-			log.Info("synced", "folder", f.Name,
-				"up", stats.Uploaded, "down", stats.Downloaded,
-				"moved", stats.Moved, "deleted", stats.Deleted, "conflicts", stats.Conflicts)
-		}
-		files := 0
-		if st, err := client.OpenState(f.LocalPath); err == nil {
-			if m, err := st.All(); err == nil {
-				files = len(m)
-			}
-			st.Close()
-		}
-		state.FinishSync(f, files, fmt.Sprintf("↑%d ↓%d 移%d 删%d", stats.Uploaded, stats.Downloaded, stats.Moved, stats.Deleted))
-		if stats.Conflicts > 0 {
-			state.AddConflicts(f.Name, stats.Conflicts)
-		}
+	d := &client.Daemon{
+		Cfg:      cfg,
+		API:      client.NewAPI(cfg.ServerURL, cfg.Token),
+		Engine:   &client.Engine{Cfg: cfg, API: client.NewAPI(cfg.ServerURL, cfg.Token), Log: log},
+		State:    client.NewDaemonState(),
+		Log:      log,
+		Only:     *only,
+		HTTPAddr: *httpAddr,
 	}
-	syncAll := func() {
-		for i := range cfg.Folders {
-			f := &cfg.Folders[i]
-			if *only != "" && f.Name != *only {
-				continue
-			}
-			syncOne(f)
-		}
-	}
-
-	// M3：本地控制 API / 状态页（冲突与错误可见性）
-	if *httpAddr != "off" {
-		ctl := &client.ControlAPI{
-			State:   state,
-			Trigger: syncAll,
-			Log:     log,
-		}
-		if err := client.ServeControl(*httpAddr, ctl); err != nil {
-			log.Warn("控制 API 启动失败（继续运行）", "addr", *httpAddr, "err", err)
-		} else {
-			log.Info("控制 API/状态页", "addr", "http://"+*httpAddr)
-		}
-	}
-
-	// M2：FS 事件监听（防抖触发）
-	watcher, err := client.NewWatcher(2 * time.Second)
-	if err == nil {
-		localToName := map[string]string{}
-		for i := range cfg.Folders {
-			f := cfg.Folders[i]
-			if err := watcher.AddRecursive(f.LocalPath); err != nil {
-				log.Warn("监听失败", "folder", f.Name, "err", err)
-			}
-			localToName[f.LocalPath] = f.Name
-		}
-		go watcher.Run(func(localPath string) {
-			name, ok := localToName[localPath]
-			if !ok || (*only != "" && name != *only) {
-				return
-			}
-			for i := range cfg.Folders {
-				if cfg.Folders[i].Name == name {
-					syncOne(&cfg.Folders[i])
-				}
-			}
-		})
-		log.Info("FS 事件监听已启用")
-	} else {
-		log.Warn("FS 事件监听不可用，退化为纯轮询", "err", err)
-	}
-
-	// M3：WebSocket 订阅（准实时；断线退化为轮询）
-	client.SubscribeNotify(api, syncAll)
-
-	log.Info("daemon started", "interval", interval.String(), "reconcile", reconcile.String())
-
-	// 兜底轮询 + 定时全量对账
-	tick := time.NewTicker(*interval)
-	defer tick.Stop()
-	rc := time.NewTicker(*reconcile)
-	defer rc.Stop()
-	for {
-		select {
-		case <-tick.C:
-			syncAll()
-		case <-rc.C:
-			syncAll()
-		}
-	}
+	d.Engine.API = d.API
+	d.Run(*interval, *reconcile)
+	return nil
 }
 
 func cmdStatus() error {

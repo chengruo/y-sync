@@ -13,6 +13,17 @@ say()  { echo -e "$1"; }
 ok()   { PASS=$((PASS+1)); say "  \033[32mPASS\033[0m $1"; }
 bad()  { FAIL=$((FAIL+1)); say "  \033[31mFAIL\033[0m $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1 — [$2]"; fi }
+# wait_for: 轮询等待条件成立（消除时序脆弱性）。用法: wait_for "desc" 20 'cond'
+wait_for(){
+  local desc="$1" t="$2" cond="$3" end
+  end=$((SECONDS + t))
+  while [ "$SECONDS" -lt "$end" ]; do
+    if eval "$cond" >/dev/null 2>&1; then ok "$desc"; return 0; fi
+    sleep 0.3
+  done
+  bad "$desc — 超时 [${cond}]"
+  return 1
+}
 
 cleanup() { kill $SERVER_PID 2>/dev/null; [ -n "${E2E_KEEP:-}" ] || rm -rf "$WORK"; }
 trap cleanup EXIT
@@ -105,6 +116,41 @@ $YS_B sync >/dev/null 2>&1
 check "多文件夹: B 收到 notes" "test -f "$WORK/B/notes/n1.md""
 check "多文件夹互不干扰"       "test -f "$WORK/B/proj/a.txt""
 
+# ---------- M3: 选择性同步（FR-S9 --exclude）----------
+mkdir -p "$WORK/A/sel/skip"
+echo "keep-me" > "$WORK/A/sel/keep.txt"
+echo "secret" > "$WORK/A/sel/skip/hidden.txt"
+$YS add "$WORK/A/sel" --as sel --exclude skip >/dev/null
+$YS sync >/dev/null 2>&1
+$YS_B add "$WORK/B/sel" --as sel >/dev/null
+$YS_B sync >/dev/null 2>&1
+check "选择性同步: 排除子树不同步" "test ! -e "$WORK/B/sel/skip""
+check "选择性同步: 其余正常同步"   "test -f "$WORK/B/sel/keep.txt""
+
+# ---------- M2: use-gitignore（FR-S8 沿用 .gitignore）----------
+mkdir -p "$WORK/A/gig"
+echo "*.gen" > "$WORK/A/gig/.gitignore"
+echo "generated" > "$WORK/A/gig/x.gen"
+echo "normal" > "$WORK/A/gig/ok.txt"
+$YS add "$WORK/A/gig" --as gig --use-gitignore >/dev/null
+$YS sync >/dev/null 2>&1
+$YS_B add "$WORK/B/gig" --as gig >/dev/null
+$YS_B sync >/dev/null 2>&1
+check "use-gitignore: .gen 被忽略" "test ! -f "$WORK/B/gig/x.gen""
+check "use-gitignore: 其余同步"    "test -f "$WORK/B/gig/ok.txt""
+
+# ---------- M3: 嵌套文件夹拒绝（FR-S15）----------
+mkdir -p "$WORK/A/notes/sub"
+$YS add "$WORK/A/notes/sub" --as notes-sub >/dev/null 2>&1 && bad "嵌套文件夹应被拒绝" || ok "嵌套文件夹被拒绝"
+
+# ---------- M3: 限速冒烟（FR-S12，验证代码路径）----------
+python3 -c "import json;p='$WORK/cfgA/config.json';c=json.load(open(p));c['upload_limit_kbs']=8192;json.dump(c,open(p,'w'))"
+head -c 1048576 /dev/zero > "$WORK/A/proj/rl.bin"
+$YS sync >/dev/null 2>&1 && ok "限速配置下上传正常" || bad "限速配置下上传正常"
+python3 -c "import json;p='$WORK/cfgA/config.json';c=json.load(open(p));c.pop('upload_limit_kbs',None);json.dump(c,open(p,'w'))"
+$YS_B sync >/dev/null 2>&1
+check "限速文件传播到 B" "test -f "$WORK/B/proj/rl.bin""
+
 # ---------- 断连恢复：服务端重启后客户端自动收敛（M1 验收）----------
 mkdir -p "$WORK/A/proj/offline"
 echo "offline-write" > "$WORK/A/proj/offline/o.txt"
@@ -169,13 +215,14 @@ $YS sync >/dev/null 2>&1; $YS_B sync >/dev/null 2>&1
 check "嵌套 ignore: x.txt 不同步" "test ! -f "$WORK/B/proj/sub2/x.txt""
 check "嵌套 ignore: y.txt 同步"   "test -f "$WORK/B/proj/sub2/y.txt""
 
-# ---------- M3: daemon 控制 API/状态页 ----------
-$YS daemon -http 127.0.0.1:18731 -interval 2s >/dev/null 2>&1 &
+# ---------- M3: daemon 控制 API/管理页（token 认证；60s 轮询间隔 → 快速传播只能来自 WS/事件）----------
+$YS daemon -http 127.0.0.1:18731 -interval 60s >"$WORK/daemon.log" 2>&1 &
 DAEMON_PID=$!
-sleep 2
-check "daemon 状态页可达"      "curl -s http://127.0.0.1:18731/status | grep -q proj"
-check "daemon 状态页 HTML"     "curl -s http://127.0.0.1:18731/ | grep -q 'y-sync'"
-kill $DAEMON_PID 2>/dev/null
+wait_for "daemon 启动并写出 daemon.json" 10 "test -f $WORK/cfgA/daemon.json"
+DAEMON_TOKEN=$(python3 -c "import json;print(json.load(open('$WORK/cfgA/daemon.json'))['token'])")
+check "无 token 访问被拒 (401)"  "[ \$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18731/status) = 401 ]"
+check "带 token 可读状态"        "curl -s 'http://127.0.0.1:18731/status?token=$DAEMON_TOKEN' | grep -q proj"
+check "管理页 HTML 可达"         "curl -s 'http://127.0.0.1:18731/?token=$DAEMON_TOKEN' | grep -q '管理台'"
 
 # ---------- M4: 只读分享（FR-H1）----------
 SHARE_TOKEN=$($YS share proj a.txt 2>/dev/null | grep -oE '/s/[0-9a-f]+' | cut -d/ -f3)
@@ -196,6 +243,59 @@ check "浏览页可达"             "curl -s 'http://$SRV_ADDR/browse?token=$TOK
 # ---------- M3: backup（SR5）----------
 YSYNC_DATA="$SRV_DATA" "$ROOT/bin/y-sync-server" backup -out "$WORK/backup" >/dev/null 2>&1 && ok "backup 完成" || bad "backup 完成"
 check "backup 含元数据快照"    "test -f "$WORK/backup/y-sync.db" && test -f "$WORK/backup/manifest.json""
+
+# ---------- M3: 管理台操作（加/移除/冲突处理/暂停）+ WS 准实时 ----------
+# A 侧从此由 daemon 驱动（轮询 60s）：快速传播证明 WS/FS 事件生效
+api_post(){ # 用法: api_post <path> <json>；绕开 check/eval 的引号问题
+  curl -s -X POST "http://127.0.0.1:18731/$1?token=$DAEMON_TOKEN" \
+    -H 'Content-Type: application/json' -d "$2"
+}
+
+# 4a. 通过管理台接入新文件夹
+mkdir -p "$WORK/A/uiadd"
+echo "from-ui" > "$WORK/A/uiadd/hello.txt"
+ADD_R=$(api_post add "{\"local_path\":\"$WORK/A/uiadd\",\"name\":\"uiadd\",\"excludes\":[\"node_modules\"]}")
+check "管理台接入文件夹 (POST /add)" 'echo "$ADD_R" | grep -q ok'
+TOKEN_A=${TOKEN_A:-$(python3 -c "import json;print(json.load(open('$WORK/cfgA/config.json'))['token'])")}
+wait_for "接入后 daemon 自动上行" 15 "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=uiadd' | grep -q hello.txt"
+$YS_B add "$WORK/B/uiadd" --as uiadd >/dev/null
+$YS_B sync >/dev/null 2>&1
+check "B 收到 UI 接入的文件夹" "test -f "$WORK/B/uiadd/hello.txt""
+
+# 4b. WS 准实时：B 修改（无并发）→ daemon A（60s 轮询）秒级取回
+echo "ws-change" > "$WORK/B/notes/n1.md"
+$YS_B sync >/dev/null 2>&1
+wait_for "WS 触发 A 拉取（非轮询）" 25 "grep -q 'ws-change' "$WORK/A/notes/n1.md""
+
+# 4c. 冲突处理（确定性构造）：暂停 A → 双方各改 → 恢复 → 冲突副本
+R=$(api_post pause '{"folder":"notes"}')
+check "暂停文件夹 (POST /pause)" 'echo "$R" | grep -q ok'
+echo "A-local" > "$WORK/A/notes/n1.md"
+echo "B-side" > "$WORK/B/notes/n1.md"
+$YS_B sync >/dev/null 2>&1
+R=$(api_post resume '{"folder":"notes"}')
+check "恢复文件夹 (POST /resume)" 'echo "$R" | grep -q ok'
+R=$(api_post sync '{"folder":"notes"}')
+wait_for "恢复后产生冲突副本" 25 "ls "$WORK/A/notes" | grep -q 'conflict from'"
+CINFO=$(curl -s "http://127.0.0.1:18731/conflicts?token=$DAEMON_TOKEN" | python3 -c "
+import json,sys
+c=[x for x in json.load(sys.stdin)['conflicts'] if x['folder']=='notes']
+assert c, 'no conflicts'
+print(c[0]['rel'] + '|' + c[0]['copy_rel'])")
+check "管理台列出冲突 (GET /conflicts)" 'test -n "$CINFO"'
+CREL="${CINFO%%|*}"; CCOPY="${CINFO##*|}"
+RES_R=$(api_post resolve "{\"folder\":\"notes\",\"rel\":\"$CREL\",\"copy_rel\":\"$CCOPY\",\"choice\":\"copy\"}")
+check "管理台处理冲突: 采用副本 (POST /resolve)" 'echo "$RES_R" | grep -q ok'
+wait_for "冲突副本被清理" 20 "! ls "$WORK/A/notes" | grep -q 'conflict from'"
+check "原名文件已是副本内容"    "grep -q 'B-side' "$WORK/A/notes/n1.md""
+
+# 4d. 移除文件夹 + daemon 退出清理
+REM_R=$(api_post remove '{"name":"uiadd"}')
+check "管理台移除文件夹 (POST /remove)" 'echo "$REM_R" | grep -q ok'
+check "移除后状态不再包含"      "! curl -s "http://127.0.0.1:18731/status?token=$DAEMON_TOKEN" | grep -q uiadd"
+kill $DAEMON_PID 2>/dev/null
+wait $DAEMON_PID 2>/dev/null
+check "daemon 退出清理 daemon.json" "[ ! -f "$WORK/cfgA/daemon.json" ]"
 
 # ---------- 幂等重同步（无变更应安静收敛）----------
 $YS sync >/dev/null 2>&1 && $YS_B sync >/dev/null 2>&1 && ok "重复同步幂等" || bad "重复同步幂等"

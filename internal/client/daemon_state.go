@@ -76,6 +76,14 @@ func (d *DaemonState) Resume(name string) {
 	}
 }
 
+// Forget 移除文件夹的运行状态记录（解除跟踪后调用）。
+func (d *DaemonState) Forget(name string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.status, name)
+	delete(d.paused, name)
+}
+
 func (d *DaemonState) IsPaused(name string) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
