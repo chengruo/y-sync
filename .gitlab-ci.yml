@@ -11,6 +11,19 @@ stages:
   - build
   - release
 
+rust:
+  stage: test
+  image: rust:latest
+  cache:
+    key: cargo
+    paths:
+      - .cargo/
+  variables:
+    CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  script:
+    - cargo check -p ysync-core -p ysyncd -p ysync-server-rs
+    - cargo test -p ysync-core -p ysyncd -p ysync-server-rs
+
 variables:
   GOPATH: "$CI_PROJECT_DIR/.gopath"
   GOCACHE: "$CI_PROJECT_DIR/.gocache"

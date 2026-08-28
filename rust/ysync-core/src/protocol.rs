@@ -90,23 +90,23 @@ pub struct HeadResp {
     pub cursor: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Op {
-    #[serde(rename = "op")]
+    #[serde(rename = "op", default)]
     pub op: String,
-    #[serde(rename = "node_id", skip_serializing_if = "is_zero")]
+    #[serde(rename = "node_id", default, skip_serializing_if = "is_zero")]
     pub node_id: i64,
-    #[serde(rename = "parent_id", skip_serializing_if = "is_zero")]
+    #[serde(rename = "parent_id", default, skip_serializing_if = "is_zero")]
     pub parent_id: i64,
     #[serde(rename = "name", default)]
     pub name: String,
-    #[serde(rename = "type", skip_serializing_if = "String::is_empty", default)]
+    #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
-    #[serde(rename = "content_hash", skip_serializing_if = "String::is_empty", default)]
+    #[serde(rename = "content_hash", default, skip_serializing_if = "String::is_empty")]
     pub content_hash: String,
-    #[serde(rename = "size", skip_serializing_if = "is_zero")]
+    #[serde(rename = "size", default, skip_serializing_if = "is_zero")]
     pub size: i64,
-    #[serde(rename = "mtime", skip_serializing_if = "is_zero")]
+    #[serde(rename = "mtime", default, skip_serializing_if = "is_zero")]
     pub mtime: i64,
 }
 

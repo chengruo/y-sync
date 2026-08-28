@@ -47,3 +47,23 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check（服务端/客户端 Rust 实现）
+        run: cargo check -p ysync-core -p ysyncd -p ysync-server-rs
+      - name: Test
+        run: cargo test -p ysync-core -p ysyncd -p ysync-server-rs
+
+  rust-desktop:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check（Tauri 桌面壳）
+        run: cargo check -p ysync-desktop

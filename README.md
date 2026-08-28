@@ -106,8 +106,12 @@ desktop/src-tauri    Tauri v2 桌面壳：托盘状态灯/菜单/通知，对接
 bin/ysyncd-rs        构建产物（cargo build --release -p ysyncd）
 ```
 
-差分验证：`bash scripts/e2e-matrix.sh` —— Go/Rust 客户端（A/B 位置互换）与服务端
-组合下运行同一套 76 项 e2e 断言，全部通过视为移植等价。
+rust/ysync-server-rs  Rust 服务端（Go 版完整移植：存储/变更日志/回收站/版本/分享/
+                      WebDAV/WS 通知/分块上传/backup）
+
+差分验证：`bash scripts/e2e-matrix.sh` —— Go/Rust 服务端 × Go/Rust 客户端共 6 个
+组合运行同一套 76 项 e2e 断言，全部通过视为移植等价。Rust 服务端构建：
+`cargo build --release -p ysync-server-rs && cp target/release/ysync-server-rs bin/`。
 
 ### Go 实现
 
