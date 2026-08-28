@@ -28,3 +28,6 @@ desktop.ini
 # 本地环境配置（勿提交真实地址/凭据）
 .env
 *.local.toml
+
+# Rust 构建产物
+/target/

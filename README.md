@@ -58,6 +58,9 @@
 ```bash
 go build -o bin/y-sync-server ./cmd/y-sync-server
 go build -o bin/ysync ./cmd/ysync
+# Rust 客户端与桌面壳（可选）
+cargo build --release -p ysyncd && cp target/release/ysyncd bin/ysyncd-rs
+cargo build --release -p ysync-desktop   # Tauri 桌面壳
 ```
 
 ## 快速开始
@@ -93,6 +96,20 @@ open http://127.0.0.1:8730/               # 状态页（冲突/错误可见、�
 默认 `~/.config/y-sync/`（macOS: `~/Library/Application Support/y-sync/`））。
 
 ## 架构
+
+### Rust 实现（与 Go 协议等价，e2e 差分验证）
+
+```
+rust/ysync-core      协议类型/配置/控制客户端（Go 端镜像，Tauri 壳与 ysyncd 共用）
+rust/ysyncd          Rust 客户端（ysync 命令的完整移植：引擎/ignore/分块续传/WS/管理台）
+desktop/src-tauri    Tauri v2 桌面壳：托盘状态灯/菜单/通知，对接 daemon 控制 API
+bin/ysyncd-rs        构建产物（cargo build --release -p ysyncd）
+```
+
+差分验证：`bash scripts/e2e-matrix.sh` —— Go/Rust 客户端（A/B 位置互换）与服务端
+组合下运行同一套 76 项 e2e 断言，全部通过视为移植等价。
+
+### Go 实现
 
 ```
 cmd/y-sync-server    服务端入口（serve/adduser/passwd/list-users/gc/backup）

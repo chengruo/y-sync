@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/ysync-core",
+    "rust/ysyncd",
+    "rust/ysync-server-rs",
+    "desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"
+libc = "0.2"
+dirs = "5"
+rand = "0.8"
+httparse = "1"
+tiny_http = "0.12"
+regex = "1"
+notify = "7"
+url = "2"
+
+[profile.release]
+strip = true
+lto = true

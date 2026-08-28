@@ -7,6 +7,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="$(mktemp -d /tmp/ysync-e2e.XXXXXX)"
 SRV_DATA="$WORK/server-data"
 SRV_ADDR="127.0.0.1:18720"
+# 可参数化（差分验证）：SERVER_BIN / BIN_A / BIN_B 可指向 Rust 实现
+SERVER_BIN="${SERVER_BIN:-$ROOT/bin/y-sync-server}"
+CLIENT_A="${BIN_A:-$ROOT/bin/ysync}"
+CLIENT_B="${BIN_B:-$ROOT/bin/ysync}"
+say "  实现组合: server=$(basename $SERVER_BIN) A=$(basename $CLIENT_A) B=$(basename $CLIENT_B)"
 PASS=0; FAIL=0
 
 say()  { echo -e "$1"; }
@@ -32,7 +37,7 @@ export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
 say "== e2e 工作目录: $WORK =="
 
 # ---------- 启动服务端 ----------
-"$ROOT/bin/y-sync-server" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >"$WORK/server.log" 2>&1 &
+"$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for i in $(seq 1 50); do
   curl -s "http://$SRV_ADDR/healthz" >/dev/null 2>&1 && break
@@ -42,11 +47,11 @@ curl -s "http://$SRV_ADDR/healthz" | grep -q ok && ok "服务端启动" || { bad
 
 # ---------- 用户与两个"设备" ----------
 export YSYNC_CONFIG_DIR="$WORK/cfgA"   # 设备 A 配置目录
-YSYNC_DATA="$SRV_DATA" "$ROOT/bin/y-sync-server" adduser alice <<<"secret123" >/dev/null 2>&1
+YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" adduser alice <<<"secret123" >/dev/null 2>&1
 
 SRV="http://$SRV_ADDR"
-YS="env YSYNC_CONFIG_DIR=$WORK/cfgA $ROOT/bin/ysync"
-YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $ROOT/bin/ysync"
+YS="env YSYNC_CONFIG_DIR=$WORK/cfgA $CLIENT_A"
+YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $CLIENT_B"
 
 $YS init -server "$SRV" -user alice -device deviceA <<<"secret123" >/dev/null 2>&1 \
   && ok "客户端 A 登录" || bad "客户端 A 登录"
@@ -156,7 +161,7 @@ mkdir -p "$WORK/A/proj/offline"
 echo "offline-write" > "$WORK/A/proj/offline/o.txt"
 kill $SERVER_PID; sleep 0.3
 $YS sync >/dev/null 2>&1 && bad "断连期间 sync 应失败" || ok "断连期间 sync 报错"
-"$ROOT/bin/y-sync-server" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
+"$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for i in $(seq 1 50); do curl -s "http://$SRV_ADDR/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
 $YS sync >/dev/null 2>&1 && ok "重连后 sync 成功" || bad "重连后 sync 成功"
@@ -241,7 +246,7 @@ TOKEN_A=$(python3 -c "import json,os;print(json.load(open(os.path.join(os.enviro
 check "浏览页可达"             "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=proj' | grep -q a.txt"
 
 # ---------- M3: backup（SR5）----------
-YSYNC_DATA="$SRV_DATA" "$ROOT/bin/y-sync-server" backup -out "$WORK/backup" >/dev/null 2>&1 && ok "backup 完成" || bad "backup 完成"
+YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" backup -out "$WORK/backup" >/dev/null 2>&1 && ok "backup 完成" || bad "backup 完成"
 check "backup 含元数据快照"    "test -f "$WORK/backup/y-sync.db" && test -f "$WORK/backup/manifest.json""
 
 # ---------- M3: 管理台操作（加/移除/冲突处理/暂停）+ WS 准实时 ----------

@@ -247,8 +247,11 @@ y-sync/
 M1–M4 已全部实现并通过 53 项端到端断言（`scripts/e2e.sh`）+ 单元测试。细节见 README
 "实现状态对照"。与本文档的有意偏差：
 
-1. 技术栈按 §7 判据选了 Go（而非 Rust），布局对应：protocol → internal/protocol，
-   engine → internal/client/engine.go，server → internal/server。
+1. 技术栈：服务端保留 Go（headless 守护进程，重写无用户可感知收益）；客户端已
+   完成 Rust 移植（rust/ysyncd，协议等价 + e2e 差分矩阵验证）与 Tauri v2 桌面壳
+   （desktop/src-tauri，托盘状态灯/菜单，对接 daemon 控制 API，不内嵌引擎——
+   FR-C3"引擎常驻、GUI 是薄壳"的 Rust 版落地）。布局对应：protocol → internal/protocol
+   与 rust/ysync-core/src/protocol.rs（两端镜像，JSON 形状一致）。
 2. M3 的"桌面托盘 GUI"以 daemon 本地控制 API + Web 状态页（127.0.0.1:8730）代替
    （§3.5 的"引擎常驻、GUI 是薄壳"架构不变；原生托盘壳留待 Tauri 评估）。
 3. 版本保留策略实现了"每文件最近 N 版"（时间梯度清理未做）。

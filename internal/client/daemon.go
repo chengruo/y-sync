@@ -331,11 +331,11 @@ func (d *Daemon) RemoveFolder(name string) error {
 	return nil
 }
 
-// Conflicts 列出全部文件夹的冲突副本。
+// Conflicts 列出全部文件夹的冲突副本（保证返回非 nil，JSON 为 [] 而非 null）。
 func (d *Daemon) Conflicts() []Conflict {
 	d.cfgMu.Lock()
 	defer d.cfgMu.Unlock()
-	var out []Conflict
+	out := []Conflict{}
 	for i := range d.Cfg.Folders {
 		f := d.Cfg.Folders[i]
 		cs, err := ListConflicts(f.LocalPath, f.Name)

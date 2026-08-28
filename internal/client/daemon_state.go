@@ -100,10 +100,10 @@ func (d *DaemonState) BeginSync(name string) bool {
 func (d *DaemonState) FinishSync(f *Folder, files int, stats string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	s := d.status[f.Name]
-	if s == nil {
-		s = &FolderStatus{Name: f.Name, LocalPath: f.LocalPath}
-		d.status[f.Name] = s
+	// 只更新已存在的条目：已解除跟踪的文件夹不得被竞态重新加入快照
+	s, ok := d.status[f.Name]
+	if !ok {
+		return
 	}
 	s.LastSync = time.Now()
 	s.Cursor = f.Cursor
@@ -115,10 +115,9 @@ func (d *DaemonState) FinishSync(f *Folder, files int, stats string) {
 func (d *DaemonState) FailSync(f *Folder, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	s := d.status[f.Name]
-	if s == nil {
-		s = &FolderStatus{Name: f.Name, LocalPath: f.LocalPath}
-		d.status[f.Name] = s
+	s, ok := d.status[f.Name]
+	if !ok {
+		return
 	}
 	s.LastSync = time.Now()
 	s.LastError = err.Error()
