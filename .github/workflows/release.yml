@@ -1,0 +1,45 @@
+# 推送 tag（如 v0.2.0）自动构建多平台二进制并创建 GitHub Release。
+# 依赖 GITHUB_TOKEN（仓库默认自动提供，权限已在 permissions 中声明）。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - name: Build
+        run: |
+          mkdir -p dist
+          set -e
+          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS="${platform%/*}"; GOARCH="${platform#*/}"
+            EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
+              -o "dist/y-sync-server-${GOOS}-${GOARCH}${EXT}" ./cmd/y-sync-server
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
+              -o "dist/y-sync-${GOOS}-${GOARCH}${EXT}" ./cmd/ysync
+          done
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: y-sync ${{ github.ref_name }}
+          body: |
+            轻量文件同步服务 y-sync 发布版本 ${{ github.ref_name }}。
+
+            - `y-sync-server-*`：服务端
+            - `y-sync-*`：客户端（ysync）
+            - 覆盖 linux / darwin / windows（amd64 / arm64）
+          files: dist/*
+          generate_release_notes: true
