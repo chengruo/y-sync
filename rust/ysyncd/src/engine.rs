@@ -332,6 +332,23 @@ impl Engine {
         let root = f.local_path.clone();
         std::fs::create_dir_all(&root)?;
 
+        // 并发互斥：跨进程 flock（daemon 与 CLI / 双 CLI 并发时后来者跳过）。
+        // 锁随 fd 关闭自动释放，持有至本函数返回。
+        std::fs::create_dir_all(root.join(".y-sync"))?;
+        let sync_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(".y-sync").join("sync.lock"))?;
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::flock(sync_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                return Err(ysync_core::Error::SyncBusy);
+            }
+        }
+        let _sync_lock_guard = sync_lock; // 保持持有到函数结束
+
         // 崩溃恢复（M2）
         if crate::state::pending_marker_exists(&root) {
             eprintln!("level=WARN msg=\"检测到未完成的元数据提交，重建本地状态\" folder={:?}", f.name);
@@ -806,21 +823,35 @@ impl Engine {
         // 10. 上行之元数据操作（mkdir → unlink → move → put）
         crate::state::write_pending_marker(&root);
 
-        // 10a. mkdir
-        let mut mkdir_ops: Vec<Op> = Vec::new();
-        let mut mkdir_rels: Vec<String> = Vec::new();
-        for rel in &local_dirs {
-            if node_at.get(rel).copied().unwrap_or(0) != 0 {
+        // 10a. mkdir：按深度逐层分批——同批内父目录 id 尚不可知，
+        // 必须等上一层结果回填 created_dirs 后再发下一层（多级目录链的正确性关键）
+        let mut pending_dirs: Vec<String> = local_dirs
+            .iter()
+            .filter(|rel| node_at.get(*rel).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect();
+        pending_dirs.sort_by_key(|r| depth(r));
+        while !pending_dirs.is_empty() {
+            let min_depth = pending_dirs.iter().map(|r| depth(r)).min().unwrap();
+            let this_batch: Vec<String> = pending_dirs
+                .iter()
+                .filter(|r| depth(r) == min_depth)
+                .cloned()
+                .collect();
+            pending_dirs.retain(|r| depth(r) != min_depth);
+            let mut mkdir_ops: Vec<Op> = Vec::new();
+            let mut mkdir_rels: Vec<String> = Vec::new();
+            for rel in &this_batch {
+                let (parent_id, pname) = match self.parent_for(rel, f, &node_at, &created_dirs) {
+                    Some(v) => v,
+                    None => continue, // 父目录缺失：留待后续批次
+                };
+                mkdir_ops.push(Op { op: protocol::OP_MKDIR.into(), parent_id, name: pname, ..Default::default() });
+                mkdir_rels.push(rel.clone());
+            }
+            if mkdir_ops.is_empty() {
                 continue;
             }
-            let (parent_id, pname) = match self.parent_for(rel, f, &node_at, &created_dirs) {
-                Some(v) => v,
-                None => continue,
-            };
-            mkdir_ops.push(Op { op: protocol::OP_MKDIR.into(), parent_id, name: pname, ..Default::default() });
-            mkdir_rels.push(rel.clone());
-        }
-        if !mkdir_ops.is_empty() {
             let res = self.with_api(|a| a.ops(&mkdir_ops))?;
             for (i, rel) in mkdir_rels.iter().enumerate() {
                 if let Some(r) = res.get(i) {

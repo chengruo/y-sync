@@ -6,8 +6,12 @@ use tiny_http::{Header, Method, Response, Server};
 
 use crate::daemon::Daemon;
 
-pub fn serve(addr: &str, token: String, daemon: Daemon) -> Result<(), String> {
+pub fn serve(addr: &str, token: String, daemon: Daemon) -> Result<String, String> {
     let server = Server::http(addr).map_err(|e| format!("{e}"))?;
+    let actual = match server.server_addr() {
+        tiny_http::ListenAddr::IP(a) => a.to_string(),
+        _ => addr.to_string(),
+    };
     let server = Arc::new(server);
     for _ in 0..4 {
         let server = server.clone();
@@ -18,7 +22,7 @@ pub fn serve(addr: &str, token: String, daemon: Daemon) -> Result<(), String> {
             handle(request, &token, &daemon);
         });
     }
-    Ok(())
+    Ok(actual)
 }
 
 fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {

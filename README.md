@@ -113,7 +113,11 @@ rust/ysync-server-rs  Rust 服务端（Go 版完整移植：存储/变更日志/
 组合运行同一套 76 项 e2e 断言，全部通过视为移植等价。Rust 服务端构建：
 `cargo build --release -p ysync-server-rs && cp target/release/ysync-server-rs bin/`。
 
-### Go 实现
+### Go 实现（已冻结，不再维护）
+
+> ⚠️ Go 实现已功能冻结：不再接受新功能，仅作历史回归参考（e2e 中保留 go 组合验证协议
+> 兼容）。已知未修问题：多级目录链的 mkdir 批次顺序（Rust 端已按深度分层修复）、
+> daemon 并发同步重叠未做进程内互斥。新部署请使用 Rust 实现。
 
 ```
 cmd/y-sync-server    服务端入口（serve/adduser/passwd/list-users/gc/backup）
@@ -142,6 +146,9 @@ go test ./...          # ignore 匹配器等单元测试
 bash scripts/e2e.sh    # 76 项端到端断言（同步/冲突/移动/回收站/版本/分块/
                        # 崩溃恢复/嵌套 ignore/选择性同步/use-gitignore/WS 准实时/
                        # 管理台 API/冲突处理/暂停恢复/分享/WebDAV/backup）
+bash scripts/e2e-stress.sh  # 稳定性压测（30 项）：真实 kill -9 客户端/服务端、
+                            # WS 断线重连、Unicode/空格/深路径、100 文件并发
+                            # （flock 互斥）、GC 后回收站恢复、配置热重载
 ```
 
 e2e 提供 `wait_for` 轮询助手消除时序脆弱性；`E2E_KEEP=1` 保留现场目录供排查。

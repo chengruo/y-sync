@@ -264,6 +264,10 @@ fn cmd_sync(args: &[String]) -> Result<()> {
                     );
                 }
             }
+            Err(ysync_core::Error::SyncBusy) => {
+                // daemon 或另一 CLI 正在同步该文件夹：静默跳过（不是失败）
+                eprintln!("level=INFO msg=\"sync skipped (busy)\" folder={:?}", f.name);
+            }
             Err(e) => {
                 eprintln!("level=ERROR msg=\"sync failed\" folder={:?} err={e:?}", f.name);
                 had_err = true;
@@ -325,6 +329,29 @@ fn cmd_status() -> Result<()> {
         "server: {}  user: {}  device: {}",
         cfg.server_url, cfg.user, cfg.device_name
     );
+    // daemon 运行状态（易用性：一条命令看全局健康度）
+    match ysync_core::read_daemon_info() {
+        Ok(info) => {
+            let cc = ysync_core::control::ControlClient::new(&info.addr, &info.token);
+            match cc.status() {
+                Ok(folders) => {
+                    let conflicts: i64 = folders.iter().map(|f| f.conflicts_total).sum();
+                    let paused = folders.iter().filter(|f| f.paused).count();
+                    let errors = folders.iter().filter(|f| !f.last_error.is_empty()).count();
+                    println!(
+                        "daemon: running @ {}（{} 个文件夹，{} 冲突，{} 暂停，{} 错误）",
+                        info.addr,
+                        folders.len(),
+                        conflicts,
+                        paused,
+                        errors
+                    );
+                }
+                Err(e) => println!("daemon: running @ {}（通信失败: {e}）", info.addr),
+            }
+        }
+        Err(_) => println!("daemon: 未运行"),
+    }
     if cfg.folders.is_empty() {
         println!("(无同步文件夹，使用 add 接入)");
     }

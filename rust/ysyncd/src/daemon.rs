@@ -28,6 +28,7 @@ impl Daemon {
 
     /// 由本地路径定位文件夹并同步（FS 事件用）。
     pub fn sync_by_local_path(&self, local_path: String) {
+        ctx::maybe_reload();
         let abs = std::path::Path::new(&local_path).to_path_buf();
         let folder = ctx::with_cfg(|c| {
             c.folders
@@ -44,6 +45,9 @@ impl Daemon {
     }
 
     pub fn sync_all(&self) {
+        ctx::maybe_reload();
+        // 热重载后新文件夹需要进入状态快照（/status 可见性）
+        self.state.init_folders(&ctx::snapshot().folders);
         let folders = ctx::with_cfg(|c| {
             c.folders
                 .iter()
@@ -57,9 +61,14 @@ impl Daemon {
     }
 
     pub fn sync_folder(&self, f: &ysync_core::Folder) {
-        if !self.state.begin_sync(&f.name) {
-            return; // 已暂停
+        // 已暂停或本进程内正在同步（WS/事件/轮询重叠）则跳过
+        if !self.state.try_begin_sync(&f.name) {
+            return;
         }
+        let _sync_guard = SyncGuard {
+            state: self.state.clone(),
+            name: f.name.clone(),
+        };
         let mut fc = FolderCfg {
             name: f.name.clone(),
             local_path: std::path::PathBuf::from(&f.local_path),
@@ -233,21 +242,31 @@ impl Daemon {
         ));
         self.state.init_folders(&ctx::snapshot().folders);
 
-        // 控制服务
+        // 控制服务（绑定成功后用实际地址写 daemon.json，支持随机端口）
+        let mut actual_addr = self.http_addr.clone();
         if self.http_addr != "off" {
             let me = self.clone();
-            if let Err(e) = httpd::serve(&self.http_addr, self.token.clone(), me) {
-                self.log(format!(
-                    "level=WARN msg=\"控制 API 启动失败（继续运行）\" addr={} err={e:?}",
-                    self.http_addr
-                ));
-            } else {
-                self.log(format!(
-                    "level=INFO msg=\"控制 API/管理页已启动\" addr=\"http://{}/?token={}…\"",
-                    self.http_addr,
-                    &self.token[..8.min(self.token.len())]
-                ));
+            match httpd::serve(&self.http_addr, self.token.clone(), me) {
+                Err(e) => {
+                    self.log(format!(
+                        "level=WARN msg=\"控制 API 启动失败（继续运行）\" addr={} err={e:?}",
+                        self.http_addr
+                    ));
+                }
+                Ok(actual) => {
+                    actual_addr = actual.clone();
+                    self.log(format!(
+                        "level=INFO msg=\"控制 API/管理页已启动\" addr=\"http://{actual}/?token={}…\"",
+                        &self.token[..8.min(self.token.len())]
+                    ));
+                }
             }
+            let _ = ysync_core::write_daemon_info(&ysync_core::DaemonInfo {
+                pid: std::process::id() as i32,
+                addr: actual_addr,
+                token: self.token.clone(),
+                started: crate::api::now_millis(),
+            });
         }
 
         // FS 事件监听（递归 + 防抖）
@@ -321,6 +340,17 @@ impl Daemon {
                 std::process::exit(0);
             }
         }
+    }
+}
+
+/// 进程内同步守卫：任何退出路径都释放 syncing 标记。
+struct SyncGuard {
+    state: std::sync::Arc<DaemonState>,
+    name: String,
+}
+impl Drop for SyncGuard {
+    fn drop(&mut self) {
+        self.state.end_sync(&self.name);
     }
 }
 

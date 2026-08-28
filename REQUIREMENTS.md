@@ -252,6 +252,10 @@ M1–M4 已全部实现并通过 53 项端到端断言（`scripts/e2e.sh`）+ �
    （desktop/src-tauri）。服务端：Go（cmd/y-sync-server）与 Rust（rust/ysync-server-rs）
    均为完整实现。协议类型两端镜像（internal/protocol ↔ rust/ysync-core/src/protocol.rs）。
    迁移策略：协议冻结 v1，任一实现的问题不阻塞另一端；e2e 即协议一致性测试。
+   **2026-08-29 更新：Go 实现已冻结（不再维护）**，Rust 为唯一维护实现；
+   稳定性保障新增：跨进程同步互斥（.y-sync/sync.lock flock）、进程内 syncing 标记、
+   mkdir 按深度分层批次、daemon 配置热重载（CLI add/remove 运行期生效）、
+   压测脚本 scripts/e2e-stress.sh（真实 kill -9 / WS 重连 / Unicode 深路径 / 百文件并发）。
 2. M3 的"桌面托盘 GUI"以 daemon 本地控制 API + Web 状态页（127.0.0.1:8730）代替
    （§3.5 的"引擎常驻、GUI 是薄壳"架构不变；原生托盘壳留待 Tauri 评估）。
 3. 版本保留策略实现了"每文件最近 N 版"（时间梯度清理未做）。

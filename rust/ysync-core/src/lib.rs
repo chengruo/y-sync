@@ -5,8 +5,8 @@ pub mod control;
 pub mod protocol;
 
 pub use config::{
-    clear_daemon_info, default_device_name, is_sub_path, load_config, read_daemon_info,
-    save_config, write_daemon_info, Config, DaemonInfo, Folder,
+    clear_daemon_info, config_path, default_device_name, is_sub_path, load_config,
+    read_daemon_info, save_config, write_daemon_info, Config, DaemonInfo, Folder,
 };
 pub use control::ControlClient;
 
@@ -21,6 +21,9 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Msg(String),
+    /// 另一个同步进程/线程正持有该文件夹的锁（跨进程 flock / 进程内标记）。
+    #[error("sync busy")]
+    SyncBusy,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

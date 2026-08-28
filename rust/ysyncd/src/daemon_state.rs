@@ -86,6 +86,7 @@ pub struct DaemonState {
 
 struct Inner {
     paused: HashSet<String>,
+    syncing: HashSet<String>, // 进程内并发同步互斥（WS/事件/轮询可能重叠）
     status: HashMap<String, FolderStatus>,
 }
 
@@ -94,6 +95,7 @@ impl DaemonState {
         DaemonState {
             inner: Mutex::new(Inner {
                 paused: HashSet::new(),
+                syncing: HashSet::new(),
                 status: HashMap::new(),
             }),
         }
@@ -144,6 +146,20 @@ impl DaemonState {
         if let Some(s) = g.status.get_mut(name) {
             s.paused = false;
         }
+    }
+
+    /// 尝试开始同步：已暂停或正在同步则返回 false（WS/事件/轮询重叠时跳过）。
+    pub fn try_begin_sync(&self, name: &str) -> bool {
+        let mut g = self.inner.lock().unwrap();
+        if g.paused.contains(name) || g.syncing.contains(name) {
+            return false;
+        }
+        g.syncing.insert(name.to_string());
+        true
+    }
+
+    pub fn end_sync(&self, name: &str) {
+        self.inner.lock().unwrap().syncing.remove(name);
     }
 
     pub fn is_paused(&self, name: &str) -> bool {
