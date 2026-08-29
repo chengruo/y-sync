@@ -328,16 +328,20 @@ impl Daemon {
             }
         });
 
-        // 信号等待
-        if let Ok(mut signals) =
-            signal_hook::iterator::Signals::new([signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM])
+        // 信号等待（Windows 无 signal-hook iterator：依赖服务管理器终止，daemon.json 残留可忽略）
+        #[cfg(unix)]
         {
-            for sig in signals.forever() {
-                self.log(format!("level=INFO msg=\"daemon 退出（信号 {sig}）\""));
-                if self.http_addr != "off" {
-                    ysync_core::clear_daemon_info();
+            if let Ok(mut signals) = signal_hook::iterator::Signals::new([
+                signal_hook::consts::SIGINT,
+                signal_hook::consts::SIGTERM,
+            ]) {
+                for sig in signals.forever() {
+                    self.log(format!("level=INFO msg=\"daemon 退出（信号 {sig}）\""));
+                    if self.http_addr != "off" {
+                        ysync_core::clear_daemon_info();
+                    }
+                    std::process::exit(0);
                 }
-                std::process::exit(0);
             }
         }
     }

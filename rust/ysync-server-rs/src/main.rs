@@ -163,18 +163,22 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         audit_path: data_dir().join("audit.log"),
     });
 
-    // 优雅退出（SR6）：SIGTERM 直接退出（SQLite WAL 保证一致性）
-    let term_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    signal_hook::flag::register(signal_hook::consts::SIGTERM, term_flag.clone())
-        .map_err(|e| e.to_string())?;
-    let flag_for_thread = term_flag.clone();
-    std::thread::spawn(move || loop {
-        if flag_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("level=INFO msg=\"shutting down (SR6: 优雅退出)\"");
-            std::process::exit(0);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    });
+    // 优雅退出（SR6）：SIGTERM 直接退出（SQLite WAL 保证一致性）。
+    // signal-hook 的 flag/iterator 不支持 Windows，Windows 依赖服务管理器终止。
+    #[cfg(unix)]
+    {
+        let term_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, term_flag.clone())
+            .map_err(|e| e.to_string())?;
+        let flag_for_thread = term_flag.clone();
+        std::thread::spawn(move || loop {
+            if flag_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("level=INFO msg=\"shutting down (SR6: 优雅退出)\"");
+                std::process::exit(0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        });
+    }
 
     eprintln!(
         "level=INFO msg=\"y-sync-server-rs listening\" addr={addr} data={}",
