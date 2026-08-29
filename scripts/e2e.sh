@@ -278,6 +278,7 @@ wait_for "WS 触发 A 拉取（非轮询）" 25 "grep -q 'ws-change' "$WORK/A/no
 # 4c. 冲突处理（确定性构造）：暂停 A → 双方各改 → 恢复 → 冲突副本
 R=$(api_post pause '{"folder":"notes"}')
 check "暂停文件夹 (POST /pause)" 'echo "$R" | grep -q ok'
+sleep 1.1   # CI 文件系统时间戳粒度粗：确保 mtime 明确变化，否则引擎判"未修改"
 echo "A-local" > "$WORK/A/notes/n1.md"
 echo "B-side" > "$WORK/B/notes/n1.md"
 $YS_B sync >/dev/null 2>&1
