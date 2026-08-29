@@ -205,9 +205,20 @@ curl -s -o /dev/null -X POST -H "Authorization: Bearer $CTOK" -H 'Content-Type: 
 # A（大小写不敏感 FS）sync：CASE.txt 应落地为冲突副本而非覆盖 case.txt
 $YS sync >/dev/null 2>&1 && ok "大小写冲突场景同步完成" || bad "大小写冲突场景同步完成"
 check "大小写冲突: 原文件保留"   "grep -q case-content \"$WORK/proj/case.txt\" 2>/dev/null"
-check "大小写冲突: 副本落地"     "ls $WORK/proj | grep -q 'case conflict'"
-CCFILE=$(ls $WORK/proj/*case*conflict* 2>/dev/null | head -1)
-check "大小写冲突: 副本内容正确" "[ -n \"$CCFILE\" ] && grep -q other-case \"$CCFILE\""
+# 按文件系统大小写敏感性分支断言：CI Linux runner 敏感（共存合法）；
+# macOS/Windows 不敏感（应落地冲突副本）
+if [ -e "$WORK/proj/CASE.TXT.PROBE" ]; then rm -f "$WORK/proj/CASE.TXT.PROBE"; fi
+touch "$WORK/proj/case.txt.probe" 2>/dev/null
+CASE_INSENSITIVE_FS=false
+[ -e "$WORK/proj/CASE.TXT.PROBE" ] && CASE_INSENSITIVE_FS=true
+rm -f "$WORK/proj/case.txt.probe" "$WORK/proj/CASE.TXT.PROBE" 2>/dev/null
+if [ "$CASE_INSENSITIVE_FS" = true ]; then
+  check "不敏感FS: 副本落地"     "ls $WORK/proj | grep -q 'case conflict'"
+  CCFILE=$(ls $WORK/proj/*case*conflict* 2>/dev/null | head -1)
+  check "不敏感FS: 副本内容正确" "[ -n \"$CCFILE\" ] && grep -q other-case \"$CCFILE\""
+else
+  check "敏感FS: 大小写变体共存" "[ -f \"$WORK/proj/CASE.txt\" ] && [ -f \"$WORK/proj/case.txt\" ]"
+fi
 
 # ---------- 分享密码防爆破（P0-5）----------
 SHARE_P=$($YS share proj case.txt -password pw9 2>/dev/null | grep -oE '/s/[0-9a-f]+' | cut -d/ -f3)
