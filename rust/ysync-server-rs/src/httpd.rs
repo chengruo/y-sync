@@ -15,9 +15,48 @@ pub struct ServerState {
     pub uploads: UploadManager,
     pub hub: Hub,
     pub login_guard: LoginGuard,
+    pub share_guard: ShareGuard,
     pub http_stats: HttpStats,
     pub started_at: std::time::Instant,
     pub audit_path: std::path::PathBuf,
+}
+
+/// 分享密码防爆破（P0-5）：按 IP+token 记失败次数，5 次后锁定 60s 起指数退避。
+pub struct ShareGuard {
+    failures: std::sync::Mutex<std::collections::HashMap<(String, String), (u32, i64)>>,
+}
+
+impl ShareGuard {
+    pub fn new() -> Self {
+        ShareGuard {
+            failures: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+    pub fn check(&self, ip: &str, token: &str) -> Result<(), i64> {
+        let now = now_secs();
+        let mut g = self.failures.lock().unwrap();
+        if g.len() > 10_000 {
+            g.retain(|_, (_, until)| *until > now);
+        }
+        if let Some((_, until)) = g.get(&(ip.to_string(), token.to_string())) {
+            if *until > now {
+                return Err(until - now);
+            }
+        }
+        Ok(())
+    }
+    pub fn record_failure(&self, ip: &str, token: &str) {
+        let now = now_secs();
+        let mut g = self.failures.lock().unwrap();
+        let e = g.entry((ip.to_string(), token.to_string())).or_insert((0u32, 0i64));
+        e.0 += 1;
+        if e.0 >= 5 {
+            e.1 = now + 60i64 * (1i64 << (e.0 - 5).min(7));
+        }
+    }
+    pub fn record_success(&self, ip: &str, token: &str) {
+        self.failures.lock().unwrap().remove(&(ip.to_string(), token.to_string()));
+    }
 }
 
 /// 审计日志（P1-7）：JSONL 追加，16MB 轮转。
@@ -132,6 +171,9 @@ fn auth_ok(state: &ServerState, req: &Request) -> Option<(i64, i64)> {
         .unwrap_or_default()
         .trim_start_matches("Bearer ")
         .to_string();
+    if tok.is_empty() {
+        tok = req.header("X-Ysync-Token").unwrap_or_default();
+    }
     if tok.is_empty() {
         tok = req.q("token").unwrap_or_default();
     }
@@ -540,6 +582,20 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
 
         match (m, p) {
             ("GET", "/api/v1/nodes") => {
+                // P0-1：带 limit 参数走分页（has_more + after 游标）；不带则全量（兼容）
+                let limit: i64 = match req.q("limit") {
+                    Some(v) => v.parse().unwrap_or(-1),
+                    None => -1,
+                };
+                if limit > 0 {
+                    let after: i64 = req.q("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    return match state.store.nodes_paged(uid, after, limit) {
+                        Ok((nodes, has_more)) => ok_json(
+                            serde_json::json!({ "nodes": nodes, "has_more": has_more }),
+                        ),
+                        Err(e) => err_json(500, &e),
+                    };
+                }
                 return match state.store.nodes(uid) {
                     Ok(nodes) => ok_json(serde_json::json!({ "nodes": nodes })),
                     Err(e) => err_json(500, &e),
@@ -969,10 +1025,25 @@ fn handle_public_share(state: &ServerState, req: &Request, p: &str) -> RouteResu
         return (404, "text/html".into(), Body::Bytes("链接不存在或已过期".as_bytes().to_vec()), vec![]);
     };
     if !pwd_hash.is_empty() {
+        let ip = req
+            .header("X-Real-IP")
+            .unwrap_or_else(|| "unknown".into());
+        if let Err(retry) = state.share_guard.check(&ip, &token) {
+            let mut h = vec![("Retry-After", retry.to_string())];
+            h.push(("Content-Type", "text/html".into()));
+            return (
+                429,
+                "text/html".into(),
+                Body::Bytes(format!("尝试过于频繁，请 {retry} 秒后重试").into_bytes()),
+                h,
+            );
+        }
         let pwd = req.q("p").unwrap_or_default();
         if sha256_hex(format!("ysync-share:{pwd}").as_bytes()) != pwd_hash {
+            state.share_guard.record_failure(&ip, &token);
             return (401, "text/html".into(), Body::Bytes("需要密码（?p=）".as_bytes().to_vec()), vec![]);
         }
+        state.share_guard.record_success(&ip, &token);
     }
     let Ok(root) = node_by_id(state, user_id, node_id) else {
         return (404, "text/html".into(), Body::Bytes("内容不存在".as_bytes().to_vec()), vec![]);

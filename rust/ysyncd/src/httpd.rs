@@ -40,12 +40,17 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
 
     // 认证：query token 或 Bearer
     let mut bearer = String::new();
+    let mut htoken = String::new();
     for h in request.headers() {
         if h.field.as_str().as_str().eq_ignore_ascii_case("authorization") {
             bearer = h.value.as_str().trim_start_matches("Bearer ").to_string();
         }
+        if h.field.as_str().as_str().eq_ignore_ascii_case("x-ysync-token") {
+            htoken = h.value.as_str().to_string();
+        }
     }
-    let authed = qtoken == token || bearer == token;
+    // X-Ysync-Token 优先（P0-4：管理台改用 header，token 不进 URL）
+    let authed = htoken == token || qtoken == token || bearer == token;
     if path == "/setup-status" {
         return respond(
             request,
@@ -61,7 +66,16 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
         return respond(request, 200, "{\"status\":\"ok\"}", "application/json");
     }
     if method == Method::Get && (path == "/" || path.is_empty()) {
-        let html = page(&token);
+        // P0-4：token 不匹配时不回显管理页 token（防本机其他进程枚举）
+        let qt = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("token="))
+            .unwrap_or("");
+        let html = if qt == token {
+            page(&token)
+        } else {
+            "<!doctype html><meta charset=\"utf-8\"><p>token 无效或缺失，请通过 <code>ysync ui</code> 重新打开管理台。</p>".to_string()
+        };
         return respond(request, 200, &html, "text/html; charset=utf-8");
     }
     if !authed {
@@ -271,8 +285,14 @@ const GO_PAGE: &str = r##"<!doctype html>
 </div>
 <p style="font-size:12px;color:#8b949e">冲突处理说明：「保留当前」= 保留原名文件并删除冲突副本；「采用副本」= 用副本内容覆盖原名文件。结果会同步到所有设备。</p>
 <script>
-const TOKEN = __TOKEN__;
-const api = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + TOKEN;
+let TOKEN = new URLSearchParams(location.search).get("token") || __TOKEN__;
+// P0-4：从地址栏移除 token（防浏览器历史/引用泄漏），改用 header 携带
+if (location.search.includes("token=")) {
+  history.replaceState(null, "", location.pathname);
+}
+const api = (p) => p;
+const H = () => ({ "Content-Type": "application/json", "X-Ysync-Token": TOKEN });
+const F = (p, opt) => fetch(p, Object.assign({}, opt || {}, { headers: { "X-Ysync-Token": TOKEN } }));
 
 async function doSetup() {
   const body = {
@@ -281,21 +301,21 @@ async function doSetup() {
     password: document.getElementById("s-pass").value
   };
   if (!body.server_url || !body.user) { msg("请填写服务端地址与用户名"); return; }
-  const r = await fetch(api("/setup"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const r = await F("/setup", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
   if (!r.ok) { msg("配置失败: " + await r.text()); return; }
   msg("配置成功，开始同步");
   refresh();
 }
 async function refresh() {
   try {
-    const st = await (await fetch(api("/setup-status"))).json();
+    const st = await (await F("/setup-status")).json();
     const initd = st.initialized;
     document.getElementById("setup-title").style.display = initd ? "none" : "block";
     document.getElementById("setup-card").style.display = initd ? "none" : "block";
     document.getElementById("conflicts").parentElement.querySelectorAll("h2")[1].style.display = initd ? "" : "none";
   } catch (e) {}
   try {
-    const s = await (await fetch(api("/status"))).json();
+    const s = await (await F("/status")).json();
     const rows = document.getElementById("rows");
     rows.innerHTML = "";
     for (const f of [...s.folders].sort((a,b)=>a.name.localeCompare(b.name))) {
@@ -315,7 +335,7 @@ async function refresh() {
     }
   } catch (e) { if (String(e).indexOf("401") >= 0) msg("token 无效，请通过 ysync ui 重新打开"); }
   try {
-    const c = await (await fetch(api("/conflicts"))).json();
+    const c = await (await F("/conflicts")).json();
     const box = document.getElementById("conflicts");
     const list = c.conflicts || [];
     document.getElementById("ccount").textContent = "(" + list.length + ")";
@@ -328,7 +348,7 @@ async function refresh() {
     }
   } catch (e) {}
   try {
-    const d = await (await fetch(api("/devices"))).json();
+    const d = await (await F("/devices")).json();
     const box = document.getElementById("devices");
     const list = d.devices || [];
     document.getElementById("devcount").textContent = "(" + list.length + ")";
@@ -344,7 +364,7 @@ async function refresh() {
 }
 async function revoke(id) {
   if (!confirm("吊销设备 #" + id + "？（其 token 立即失效）")) return;
-  const r = await fetch(api("/devices/" + id), {method: "DELETE"});
+  const r = await F("/devices/" + id, {method: "DELETE"});
   if (!r.ok) msg("失败: " + await r.text());
   refresh();
 }
@@ -352,14 +372,14 @@ function btn(path, folder, label) {
   return '<button onclick=\'op("' + path + '","' + esc(folder) + '")\'>' + label + "</button>";
 }
 async function op(path, folder) {
-  const r = await fetch(api(path), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({folder})});
+  const r = await F(path, {method:"POST", headers:H(), body: JSON.stringify({folder})});
   if (!r.ok) msg("操作失败: " + await r.text()); else msg("已执行 " + path + (folder ? " " + folder : ""));
   refresh();
 }
 async function syncAll() { await op("/sync", ""); }
 async function removeFolder(name) {
   if (!confirm("解除跟踪 " + name + "？（本地文件与服务端副本都保留）")) return;
-  const r = await fetch(api("/remove"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({name})});
+  const r = await F("/remove", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({name})});
   if (!r.ok) msg("失败: " + await r.text());
   refresh();
 }
@@ -371,13 +391,13 @@ async function addFolder() {
     excludes: document.getElementById("f-ex").value.split(",").map(s=>s.trim()).filter(Boolean)
   };
   if (!body.local_path) { msg("请填写本地路径"); return; }
-  const r = await fetch(api("/add"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  const r = await F("/add", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
   if (!r.ok) msg("接入失败: " + await r.text());
   else { msg("已接入 " + body.local_path); document.getElementById("f-path").value=""; document.getElementById("f-name").value=""; }
   refresh();
 }
 async function resolve(folder, rel, copyRel, choice) {
-  const r = await fetch(api("/resolve"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({folder, rel, copy_rel: copyRel, choice})});
+  const r = await F("/resolve", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({folder, rel, copy_rel: copyRel, choice})});
   if (!r.ok) msg("失败: " + await r.text()); else msg("冲突已处理，同步传播中");
   refresh();
 }

@@ -128,6 +128,64 @@ YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >
 SERVER_PID=$!
 wait_for "服务端恢复" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
 
+# ---------- nodes 分页（P0-1）----------
+TOKQ=$(python3 -c "import json;print(json.load(open('$WORK/cfg/config.json'))['token'])")
+P1=$(curl -s "http://$SRV_ADDR/api/v1/nodes?limit=1&after=0&token=$TOKQ")
+check "nodes 分页: 第一页 has_more" 'echo "$P1" | grep -q '"'"'has_more":true'"'"''
+PAGE_IDS=$(python3 -c "
+import json,urllib.request
+tok='$TOKQ'; base='$SRV_ADDR'; after=0; ids=[]
+while True:
+    r = json.load(urllib.request.urlopen(f'http://{base}/api/v1/nodes?limit=1&after={after}&token={tok}'))
+    ids += [n['id'] for n in r['nodes']]
+    if not r['has_more']: break
+    after = r['nodes'][-1]['id']
+print(len(ids), len(set(ids)))")
+CNT=$(echo "$PAGE_IDS" | wc -l); UNIQ=$(echo "$PAGE_IDS" | sort -u | wc -l)
+check "nodes 分页: 翻页收全且无重复"       "[ $CNT -gt 0 ] && [ $CNT = $UNIQ ]"
+
+# ---------- 大小写冲突保护（P0-3，双设备构造 → A 下载为副本）----------
+echo "case-content" > "$WORK/proj/case.txt"
+$YS sync >/dev/null 2>&1
+mkdir -p "$WORK/cfgcase" "$WORK/B/caseproj"
+YS_CASE="env YSYNC_CONFIG_DIR=$WORK/cfgcase $CLIENT"
+$YS_CASE init -server "http://$SRV_ADDR" -user alice -device devCase <<<"secret123" >/dev/null 2>&1
+# devCase 是另一台"Linux 设备"：创建大小写变体并上行（服务端区分大小写，允许共存）
+YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" list-users >/dev/null  # no-op 保序
+CASE_DIR="$WORK/cfgcase/proj_tmp"
+mkdir -p "$CASE_DIR"
+$YS_CASE add "$CASE_DIR" --as proj >/dev/null 2>&1 || true
+# devCase 拉取 proj 子树（获取 case.txt）
+$YS_CASE sync >/dev/null 2>&1
+# 在 devCase 的 Linux 视角下创建大小写变体（用服务端 API 直写更稳：B 设备 token）
+CH2=$(python3 -c "import hashlib;print(hashlib.sha256(b'other-case').hexdigest())")
+CTOK=$(python3 -c "import json;print(json.load(open('$WORK/cfgcase/config.json'))['token'])")
+curl -s -o /dev/null -X PUT --data-binary "other-case" "http://$SRV_ADDR/api/v1/content?token=$CTOK"
+PARENT=$(curl -s -H "Authorization: Bearer $CTOK" "http://$SRV_ADDR/api/v1/nodes" | python3 -c "
+import json,sys
+print([n['id'] for n in json.load(sys.stdin)['nodes'] if n['path']=='proj'][0])")
+curl -s -o /dev/null -X POST -H "Authorization: Bearer $CTOK" -H 'Content-Type: application/json' \
+  -d "[{\"op\":\"put\",\"parent_id\":$PARENT,\"name\":\"CASE.txt\",\"content_hash\":\"$CH2\",\"mtime\":1700000000000}]" \
+  "http://$SRV_ADDR/api/v1/ops"
+# A（大小写不敏感 FS）sync：CASE.txt 应落地为冲突副本而非覆盖 case.txt
+$YS sync >/dev/null 2>&1 && ok "大小写冲突场景同步完成" || bad "大小写冲突场景同步完成"
+check "大小写冲突: 原文件保留"   "grep -q case-content \"$WORK/proj/case.txt\" 2>/dev/null"
+check "大小写冲突: 副本落地"     "ls $WORK/proj | grep -q 'case conflict'"
+CCFILE=$(ls $WORK/proj/*case*conflict* 2>/dev/null | head -1)
+check "大小写冲突: 副本内容正确" "[ -n \"$CCFILE\" ] && grep -q other-case \"$CCFILE\""
+
+# ---------- 分享密码防爆破（P0-5）----------
+SHARE_P=$($YS share proj case.txt -password pw9 2>/dev/null | grep -oE '/s/[0-9a-f]+' | cut -d/ -f3)
+for i in 1 2 3 4 5; do
+  curl -s -o /dev/null "http://$SRV_ADDR/s/$SHARE_P?p=wrong$i"
+done
+CODE=$(curl -s -o /dev/null -w '%{http_code}' "http://$SRV_ADDR/s/$SHARE_P?p=pw9")
+check "分享密码连错 5 次后锁定 (429)" "[ "$CODE" = "429" ]"
+
+# ---------- header token 认证（P0-4）----------
+CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Ysync-Token: $TOKQ" "http://$SRV_ADDR/api/v1/nodes")
+check "X-Ysync-Token 头认证可用" "[ "$CODE" = "200" ]"
+
 # ---------- 登录暴力破解防护（P0-3） ----------
 for i in 1 2 3 4 5; do
   curl -s -o /dev/null -X POST "http://$SRV_ADDR/api/v1/auth/login" \

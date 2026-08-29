@@ -158,6 +158,7 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         hub: hub::Hub::new(),
         store,
         login_guard: httpd::LoginGuard::new(),
+        share_guard: httpd::ShareGuard::new(),
         http_stats: httpd::HttpStats::new(),
         started_at: std::time::Instant::now(),
         audit_path: data_dir().join("audit.log"),

@@ -824,6 +824,46 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// 节点树分页列举（P0-1）：按 id 游标翻页，has_more 指示是否还有后续页。
+    pub fn nodes_paged(
+        &self,
+        user_id: i64,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<(Vec<NodeInfo>, bool), String> {
+        let limit = if limit <= 0 || limit > 10_000 { 5_000 } else { limit };
+        let conn = self.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, parent_id, name, type, path, size, mtime, content_hash
+                 FROM nodes WHERE user_id=?1 AND id>?2 ORDER BY id LIMIT ?3",
+            )
+            .map_err(to_serr)?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![user_id, after_id, limit + 1],
+                |r| {
+                    Ok(NodeInfo {
+                        id: r.get(0)?,
+                        parent_id: r.get(1)?,
+                        name: r.get(2)?,
+                        kind: r.get(3)?,
+                        path: r.get(4)?,
+                        size: r.get(5)?,
+                        mtime: r.get(6)?,
+                        content_hash: r.get(7)?,
+                    })
+                },
+            )
+            .map_err(to_serr)?;
+        let mut out: Vec<NodeInfo> = rows.filter_map(|r| r.ok()).collect();
+        let has_more = out.len() as i64 > limit;
+        if has_more {
+            out.truncate(limit as usize);
+        }
+        Ok((out, has_more))
+    }
+
     pub fn head_cursor(&self, user_id: i64) -> Result<i64, String> {
         let conn = self.db.lock().unwrap();
         conn.query_row(

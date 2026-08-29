@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use ysync_core::protocol::{self, NodeInfo, Op};
+use ysync_core::protocol::{self, NodeInfo, Op, OpResult};
 
 use crate::api::{hash_and_size, hash_local_file_helper, now_millis, set_mtime, Api};
 use crate::conflicts;
@@ -62,6 +62,28 @@ fn under_any(set: &[String], rel: &str) -> bool {
         return false;
     }
     set.iter().any(|s| s == rel || rel.starts_with(&format!("{s}/")))
+}
+
+/// 探测文件夹所在文件系统是否大小写不敏感（macOS/Windows 默认；P0-3）。
+fn fs_case_insensitive(root: &Path) -> bool {
+    let probe = root.join(".y-sync").join("caseprobe.tmp");
+    if std::fs::write(&probe, b"p").is_err() {
+        return false;
+    }
+    let upper = root.join(".y-sync").join("CASEPROBE.TMP");
+    let insensitive = upper.exists();
+    let _ = std::fs::remove_file(&probe);
+    insensitive
+}
+
+/// 构建 casefold 索引：(目录, 小写名) → 相对路径列表（P0-3 下载保护用）。
+fn build_casefold_index(scan: &HashMap<String, DiskInfo>) -> HashMap<(String, String), Vec<String>> {
+    let mut idx: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for rel in scan.keys() {
+        let (dir, name) = split_dir(rel);
+        idx.entry((dir, name.to_lowercase())).or_default().push(rel.clone());
+    }
+    idx
 }
 
 /// 与 Go os.RemoveAll 对齐：文件与目录都能删（Rust 的 remove_dir_all 不接受文件）。
@@ -265,6 +287,15 @@ impl Engine {
         self.api.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// ops 分批提交（P0-2）：单请求 ≤500 条，避免巨批压垮服务端/网络。
+    fn ops_chunked(&self, ops: &[Op]) -> Result<Vec<OpResult>, ysync_core::Error> {
+        let mut out = Vec::with_capacity(ops.len());
+        for chunk in ops.chunks(500) {
+            out.extend(self.with_api(|a| a.ops(chunk))?);
+        }
+        Ok(out)
+    }
+
     fn with_api<T>(&self, f: impl FnOnce(&mut Api) -> Result<T, ysync_core::Error>) -> Result<T, ysync_core::Error> {
         let mut api = self.api_lock();
         f(&mut api)
@@ -403,17 +434,25 @@ impl Engine {
         let new_cursor;
 
         if f.cursor == 0 {
-            let nodes = self.with_api(|a| a.nodes())?;
-            for n in nodes {
-                if n.path != f.name && !n.path.starts_with(&prefix) {
-                    continue;
+            // 初次同步：P0-1 按 id 分页拉取，免大树单响应尖峰
+            let mut after_id = 0i64;
+            loop {
+                let (page, has_more) = self.with_api(|a| a.nodes_paged(after_id, 5000))?;
+                for n in page {
+                    if n.path != f.name && !n.path.starts_with(&prefix) {
+                        continue;
+                    }
+                    let rel = n.path.trim_start_matches(&prefix).to_string();
+                    if rel.is_empty() || rel == f.name {
+                        continue; // 根节点本身不属于子树内容（避免泄漏出杂散目录）
+                    }
+                    after_id = n.id.max(after_id);
+                    changed_set.insert(rel.clone());
+                    server_now.insert(rel, n);
                 }
-                let rel = n.path.trim_start_matches(&prefix).to_string();
-                if rel.is_empty() || rel == f.name {
-                    continue; // 根节点本身不属于子树内容（避免泄漏出杂散目录）
+                if !has_more {
+                    break;
                 }
-                changed_set.insert(rel.clone());
-                server_now.insert(rel, n);
             }
             new_cursor = self.with_api(|a| a.head())?.cursor;
         } else {
@@ -493,6 +532,8 @@ impl Engine {
         // 4. 本地扫描
         let ig = ignore_root(&root, f.use_gitignore);
         let mut scan = walk_local(&root, ig, f.use_gitignore, &excluded_fn)?;
+        let case_insensitive = fs_case_insensitive(&root);
+        let mut casefold = build_casefold_index(&scan);
 
         // 5. 计算本地变更集
         let mut modified: HashMap<String, String> = HashMap::new();
@@ -764,15 +805,61 @@ impl Engine {
 
         // 8. 执行本地写入（建目录 / 下载）
         for rel in &mkdirs_local {
+            // P0-3：大小写不敏感 FS 上 casefold 重名目录 = 现有目录合并（不再新建）
+            if case_insensitive {
+                let (dir, name) = split_dir(rel);
+                let key = (dir.clone(), name.to_lowercase());
+                let dup = casefold
+                    .get(&key)
+                    .map(|v| v.iter().any(|r| r.as_str() != rel))
+                    .unwrap_or(false);
+                if dup {
+                    eprintln!("level=WARN msg=\"大小写重名目录，合并到现有目录\" path={rel:?}");
+                    continue;
+                }
+            }
             std::fs::create_dir_all(abs_join(&root, rel))?;
         }
         let mut dl_items: Vec<(String, NodeInfo)> = downloads.into_iter().collect();
         dl_items.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut pending_cc_uploads: Vec<(String, String)> = Vec::new(); // (rel, node_id)
         for (rel, n) in dl_items {
-            let abs = abs_join(&root, &rel);
-            if let Some(dir) = abs.parent() {
-                std::fs::create_dir_all(dir)?;
+            let mut rel = rel;
+            // P0-3：大小写不敏感 FS 上，同目录内 casefold 重名（不同 node）会互相覆盖——
+            // 后来者下载为冲突副本，双方内容均保留
+            if case_insensitive {
+                let (dir, name) = split_dir(&rel);
+                let key = (dir.clone(), name.to_lowercase());
+                let dup = casefold
+                    .get(&key)
+                    .map(|v| v.iter().any(|r| r.as_str() != rel))
+                    .unwrap_or(false);
+                if dup {
+                    let ext = match name.rfind('.') {
+                        Some(i) if i > 0 => name[i..].to_string(),
+                        _ => String::new(),
+                    };
+                    let base = name.trim_end_matches(&ext);
+                    let mut cc = format!("{base} (case conflict){ext}");
+                    if !dir.is_empty() {
+                        cc = format!("{dir}/{cc}");
+                    }
+                    let mut i = 2;
+                    while scan.contains_key(&cc) {
+                        cc = format!("{dir}/{base} (case conflict) {i}{ext}");
+                        i += 1;
+                    }
+                    eprintln!(
+                        "level=WARN msg=\"大小写冲突，下载为副本\" path={rel:?} copy={cc:?}"
+                    );
+                    rel = cc;
+                }
+                casefold
+                    .entry((dir, name.to_lowercase()))
+                    .or_default()
+                    .push(rel.clone());
             }
+            let abs = abs_join(&root, &rel);
             self.with_api(|a| a.get_content(&n.content_hash, &abs, n.mtime))
                 .map_err(|e| ysync_core::Error::Msg(format!("download {rel}: {e}")))?;
             let (h, size) = hash_and_size(&abs)?;
@@ -940,7 +1027,7 @@ impl Engine {
             move_plans.push(mv.clone());
         }
         if !move_ops.is_empty() {
-            let res = self.with_api(|a| a.ops(&move_ops))?;
+            let res = self.ops_chunked(&move_ops)?;
             for (i, mv) in move_plans.iter().enumerate() {
                 if let Some(r) = res.get(i) {
                     if r.ok {
@@ -1046,7 +1133,7 @@ impl Engine {
             add_put(rel, h, 0, &node_at, &created_dirs, f, &scan, &mut put_ops, &mut put_rels, &mut put_hash, &mut put_mtime);
         }
         if !put_ops.is_empty() {
-            let res = self.with_api(|a| a.ops(&put_ops))?;
+            let res = self.ops_chunked(&put_ops)?;
             for i in 0..put_rels.len() {
                 if let Some(r) = res.get(i) {
                     if r.ok {

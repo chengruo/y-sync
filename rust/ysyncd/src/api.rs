@@ -163,6 +163,25 @@ impl Api {
         Ok(check(resp)?.json::<R>()?.nodes)
     }
 
+    /// 节点树分页列举（P0-1）。返回 (nodes, has_more)。
+    pub fn nodes_paged(&self, after_id: i64, limit: i64) -> Result<(Vec<NodeInfo>, bool)> {
+        #[derive(serde::Deserialize)]
+        struct R {
+            #[serde(rename = "nodes", deserialize_with = "null_to_vec", default)]
+            nodes: Vec<NodeInfo>,
+            #[serde(rename = "has_more", default)]
+            has_more: bool,
+        }
+        let resp = self.req(
+            "GET",
+            &format!("/api/v1/nodes?after={after_id}&limit={limit}"),
+            None,
+        )
+        .send()?;
+        let r: R = check(resp)?.json()?;
+        Ok((r.nodes, r.has_more))
+    }
+
     pub fn head(&self) -> Result<HeadResp> {
         let resp = self.req("GET", "/api/v1/sync/head", None).send()?;
         check(resp)?.json::<HeadResp>().map_err(Error::from)
