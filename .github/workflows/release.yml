@@ -6,6 +6,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -44,7 +45,7 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  name: linux-amd64 }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, name: linux-arm64 }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, name: linux-arm64, cross: "1" }
           - { os: macos-latest,   target: aarch64-apple-darwin,      name: darwin-arm64 }
           - { os: macos-latest,   target: x86_64-apple-darwin,       name: darwin-amd64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    name: windows-amd64 }
@@ -54,6 +55,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: 安装 aarch64 交叉链接器
+        if: matrix.cross == '1'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -104,10 +111,12 @@ jobs:
           V="${GITHUB_REF_NAME#v}"
           npx -y @tauri-apps/cli@2 build
           mkdir -p bundle-out
-          find src-tauri/target/release/bundle -type f \
+          # workspace 构建：target/ 在仓库根；非 workspace 布局兜底 src-tauri/target
+          find target/release/bundle src-tauri/target/release/bundle -maxdepth 3 -type f \
             \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.deb" -o -name "*.AppImage" \
-               -o -name "*.msi" -o -name "*-setup.exe" \) \
-            -exec cp {} bundle-out/ \;
+               -o -name "*.msi" -o -name "*-setup.exe" \) 2>/dev/null \
+            -exec cp {} bundle-out/ \; || true
+          [ -n "$(ls -A bundle-out 2>/dev/null)" ] || { echo "::error::未找到打包产物"; exit 1; }
           ls -la bundle-out/
       - uses: actions/upload-artifact@v4
         with:
