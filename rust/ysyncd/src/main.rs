@@ -233,7 +233,7 @@ fn make_engine(cfg: &ysync_core::Config) -> std::sync::Arc<engine::Engine> {
     let mut api = api::Api::new(&cfg.server_url, &cfg.token);
     api.set_limits(cfg.upload_limit_kbs, cfg.download_limit_kbs);
     std::sync::Arc::new(engine::Engine {
-        api: std::sync::Arc::new(std::sync::Mutex::new(api)),
+        api: std::sync::Arc::new(api),
         device_name: cfg.device_name.clone(),
     })
 }
@@ -310,7 +310,25 @@ fn cmd_daemon(log: impl Fn(String) + Send + Sync + 'static, args: &[String]) -> 
 
     let engine = make_engine(&cfg);
     let state = std::sync::Arc::new(daemon_state::DaemonState::new());
-    let log = std::sync::Arc::new(log);
+    // P1-10：日志落盘 + 轮转（5MB → .1），stderr 同步保留
+    let log_dir = ysync_core::config_dir()?;
+    std::fs::create_dir_all(&log_dir)?; // setup 模式下目录可能尚不存在
+    let log_path = log_dir.join("daemon.log");
+    let logfile: std::sync::Arc<std::sync::Mutex<std::fs::File>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::fs::OpenOptions::new()
+            .create(true).append(true).open(&log_path)?));
+    let log = std::sync::Arc::new(move |msg: String| {
+        eprintln!("{msg}");
+        let mut f = logfile.lock().unwrap_or_else(|p| p.into_inner());
+        if f.metadata().map(|m| m.len()).unwrap_or(0) > 5 << 20 {
+            if let Some(p1) = log_path.with_extension("log.1").to_str() {
+                let _ = std::fs::rename(&log_path, p1);
+            }
+            *f = std::fs::OpenOptions::new().create(true).append(true)
+                .open(&log_path).unwrap_or_else(|_| std::fs::File::open(&log_path).unwrap());
+        }
+        let _ = writeln!(f, "{msg}");
+    });
 
     // daemon.json（供 ysync ui / Tauri 壳发现）
     let token: String = {

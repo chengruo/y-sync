@@ -16,6 +16,8 @@ pub struct ServerState {
     pub hub: Hub,
     pub login_guard: LoginGuard,
     pub share_guard: ShareGuard,
+    pub bytes_in: std::sync::atomic::AtomicU64,
+    pub bytes_out: std::sync::atomic::AtomicU64,
     pub http_stats: HttpStats,
     pub started_at: std::time::Instant,
     pub audit_path: std::path::PathBuf,
@@ -508,6 +510,12 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
         ] {
             out.push_str(&format!("# TYPE {name} gauge\n{name} {val}\n"));
         }
+        let bin = state.bytes_in.load(std::sync::atomic::Ordering::Relaxed);
+        let bout = state.bytes_out.load(std::sync::atomic::Ordering::Relaxed);
+        out.push_str("# TYPE ysync_bytes_in_total counter\n");
+        out.push_str(&format!("ysync_bytes_in_total {bin}\n"));
+        out.push_str("# TYPE ysync_bytes_out_total counter\n");
+        out.push_str(&format!("ysync_bytes_out_total {bout}\n"));
         out.push_str("# TYPE ysync_http_requests_total counter\n");
         out.push_str(&format!("ysync_http_requests_total {total}\n"));
         for (code, n) in &statuses {
@@ -628,6 +636,9 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                     .unwrap_or_default();
                 match state.store.blobs.put(req.body.as_slice(), &want) {
                     Ok(r) => {
+                        state
+                            .bytes_in
+                            .fetch_add(r.size as u64, std::sync::atomic::Ordering::Relaxed);
                         if let Err(e) = state.store.ensure_blob_row(&r.hash, r.size) {
                             return err_json(500, &e);
                         }
@@ -665,6 +676,9 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                         "Content-Range",
                         format!("bytes {start}-{end}/{}", size),
                     ));
+                    state
+                        .bytes_out
+                        .fetch_add(len, std::sync::atomic::Ordering::Relaxed);
                     return (
                         206,
                         "application/octet-stream".into(),
@@ -673,6 +687,9 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                     );
                 }
             }
+            state
+                .bytes_out
+                .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
             return (
                 200,
                 "application/octet-stream".into(),

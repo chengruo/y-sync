@@ -29,6 +29,7 @@ wait_for(){
 cleanup(){ [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; [ -n "${E2E_KEEP:-}" ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
+pkill -9 -f y-sync-server-rs 2>/dev/null; pkill -9 -f ysyncd-rs 2>/dev/null; sleep 0.5
 
 pkill -f y-sync-server-rs 2>/dev/null; sleep 0.2
 
@@ -101,6 +102,40 @@ kill "$SETUP_PID" 2>/dev/null; wait "$SETUP_PID" 2>/dev/null
 WM=$(curl -s "http://$SRV_ADDR/api/v1/sync/head?token=$(
   python3 -c "import json;print(json.load(open('$WORK/cfg/config.json'))['token'])")" | python3 -c "import json,sys;print(json.load(sys.stdin).get('watermark', -1))")
 check "head 返回 watermark 字段" "[ "$WM" -ge 0 ]"
+
+# ---------- 控制台代理：回收站/版本管理（P1）----------
+mkdir -p "$WORK/par"
+for i in $(seq 1 40); do echo "par-$i" > "$WORK/par/p$i.txt"; done
+$YS add "$WORK/par" --as par >/dev/null
+$YS sync >/dev/null 2>&1 && ok "并行上传初次同步（40 文件）" || bad "并行上传初次同步（40 文件）"
+mkdir -p "$WORK/cfgB" "$WORK/B/par"
+YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $CLIENT"
+$YS_B init -server "http://$SRV_ADDR" -user alice -device devB <<<"secret123" >/dev/null 2>&1
+$YS_B add "$WORK/B/par" --as par >/dev/null
+$YS_B sync >/dev/null 2>&1
+check "并行上传后 B 收全 40 文件" "[ \$(find "$WORK/B/par" -name 'p*.txt' | wc -l) -eq 40 ]"
+
+# 启动 daemon（复用 cfg）走控制台 API
+$YS daemon -http 127.0.0.1:18800 -interval 60s >"$WORK/ctl.log" 2>&1 &
+CTL_PID=$!
+wait_for "ctl daemon 启动" 10 "test -f $WORK/cfg/daemon.json"
+CTL_TOKEN=$(python3 -c "import json;print(json.load(open('$WORK/cfg/daemon.json'))['token'])")
+
+# 控制台回收站：删 par/p1 → sync → server-trash 含 → trash-restore → sync → 回到两端
+rm "$WORK/par/p1.txt"; $YS sync >/dev/null 2>&1
+TR_ID=$(curl -s "http://127.0.0.1:18800/server-trash?token=$CTL_TOKEN" | python3 -c "
+import json,sys
+items=[x for x in json.load(sys.stdin)['items'] if x['orig_path']=='par/p1.txt']
+print(items[0]['id'] if items else '')")
+check "控制台列出服务端回收站" "[ -n \"$TR_ID\" ]"
+R=$(curl -s -X POST "http://127.0.0.1:18800/trash-restore?token=$CTL_TOKEN" -H 'Content-Type: application/json' -d "{\"id\":$TR_ID}")
+check "控制台恢复回收站条目" 'echo "$R" | grep -q ok'
+curl -s -X POST "http://127.0.0.1:18800/sync?token=$CTL_TOKEN" >/dev/null; sleep 1
+$YS_B sync >/dev/null 2>&1
+check "恢复传播回两端" "test -f "$WORK/par/p1.txt" && test -f "$WORK/B/par/p1.txt""
+kill "$CTL_PID" 2>/dev/null; wait "$CTL_PID" 2>/dev/null
+
+# ---------- 登录暴力破解防护（P0-3） ----------
 
 # ---------- 日志水位触发全量重同步（A1）----------
 YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $CLIENT"

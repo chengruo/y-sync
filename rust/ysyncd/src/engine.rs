@@ -1,6 +1,7 @@
 //! 同步引擎（§4.3）：从 Go internal/client/engine.go 移植，分支语义逐一对齐。
 //! 双向 reconcile、移动语义（FR-S6）、冲突副本（FR-S7）、崩溃恢复、按文件夹独立游标。
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::path::{Path, PathBuf};
 
 use ysync_core::protocol::{self, NodeInfo, Op, OpResult};
@@ -34,7 +35,8 @@ pub struct SyncStats {
 }
 
 pub struct Engine {
-    pub api: std::sync::Arc<std::sync::Mutex<Api>>,
+    /// P1：Api 内部状态可变（连接字段 Mutex），外层不再互斥——并行传输前提
+    pub api: std::sync::Arc<Api>,
     pub device_name: String,
 }
 
@@ -282,11 +284,6 @@ pub struct FolderCfg {
 }
 
 impl Engine {
-    /// 毒锁容错访问（某次 panic 后锁数据仍可用）。
-    pub fn api_lock(&self) -> std::sync::MutexGuard<'_, Api> {
-        self.api.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
     /// ops 分批提交（P0-2）：单请求 ≤500 条，避免巨批压垮服务端/网络。
     fn ops_chunked(&self, ops: &[Op]) -> Result<Vec<OpResult>, ysync_core::Error> {
         let mut out = Vec::with_capacity(ops.len());
@@ -296,9 +293,8 @@ impl Engine {
         Ok(out)
     }
 
-    fn with_api<T>(&self, f: impl FnOnce(&mut Api) -> Result<T, ysync_core::Error>) -> Result<T, ysync_core::Error> {
-        let mut api = self.api_lock();
-        f(&mut api)
+    fn with_api<T>(&self, f: impl FnOnce(&Api) -> Result<T, ysync_core::Error>) -> Result<T, ysync_core::Error> {
+        f(&self.api)
     }
 
     fn resolve_root(&self, f: &mut FolderCfg) -> Result<i64, ysync_core::Error> {
@@ -822,11 +818,11 @@ impl Engine {
         }
         let mut dl_items: Vec<(String, NodeInfo)> = downloads.into_iter().collect();
         dl_items.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut pending_cc_uploads: Vec<(String, String)> = Vec::new(); // (rel, node_id)
+        // P0-3 casefold 串行预决策（快）：确定每个下载的最终落盘路径
+        let mut planned: Vec<(String, NodeInfo, bool)> = Vec::new();
         for (rel, n) in dl_items {
             let mut rel = rel;
-            // P0-3：大小写不敏感 FS 上，同目录内 casefold 重名（不同 node）会互相覆盖——
-            // 后来者下载为冲突副本，双方内容均保留
+            let mut is_cc = false;
             if case_insensitive {
                 let (dir, name) = split_dir(&rel);
                 let key = (dir.clone(), name.to_lowercase());
@@ -840,36 +836,110 @@ impl Engine {
                         _ => String::new(),
                     };
                     let base = name.trim_end_matches(&ext);
-                    let mut cc = format!("{base} (case conflict){ext}");
-                    if !dir.is_empty() {
-                        cc = format!("{dir}/{cc}");
-                    }
+                    let mk = |i: usize| -> String {
+                        let nm = if i == 1 {
+                            format!("{base} (case conflict){ext}")
+                        } else {
+                            format!("{base} (case conflict) {i}{ext}")
+                        };
+                        if dir.is_empty() { nm } else { format!("{dir}/{nm}") }
+                    };
+                    let mut cc = mk(1);
                     let mut i = 2;
                     while scan.contains_key(&cc) {
-                        cc = format!("{dir}/{base} (case conflict) {i}{ext}");
+                        cc = mk(i);
                         i += 1;
                     }
                     eprintln!(
                         "level=WARN msg=\"大小写冲突，下载为副本\" path={rel:?} copy={cc:?}"
                     );
                     rel = cc;
+                    is_cc = true;
                 }
+                let (dir, name) = split_dir(&rel);
                 casefold
                     .entry((dir, name.to_lowercase()))
                     .or_default()
                     .push(rel.clone());
             }
-            let abs = abs_join(&root, &rel);
-            self.with_api(|a| a.get_content(&n.content_hash, &abs, n.mtime))
-                .map_err(|e| ysync_core::Error::Msg(format!("download {rel}: {e}")))?;
-            let (h, size) = hash_and_size(&abs)?;
-            state_set.insert(
-                rel.clone(),
-                Rec { node_id: n.id, hash: h, size, mtime: n.mtime, kind: protocol::TYPE_FILE.into() },
-            );
-            scan.insert(rel, DiskInfo { size, mtime: n.mtime, is_dir: false });
-            stats.downloaded += 1;
+            planned.push((rel, n, is_cc));
         }
+        // 建父目录（并行抓取前统一完成）
+        for (rel, _, _) in &planned {
+            if let Some(dir) = abs_join(&root, rel).parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+        // P1 并行下载：4 线程消费队列；GetContent 临时名唯一，落盘原子
+        let queue: Arc<Mutex<std::collections::VecDeque<(usize, String, NodeInfo, bool)>>> =
+            Arc::new(Mutex::new(
+                planned
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (rel, n, cc))| (i, rel.clone(), n.clone(), *cc))
+                    .collect(),
+            ));
+        let out: Arc<Mutex<Vec<(usize, Rec)>>> = Arc::new(Mutex::new(Vec::new()));
+        let cc_out: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new())); // (副本rel, 原node_id字符串占位)
+        let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        {
+            let root = root.clone();
+            std::thread::scope(|s| {
+                for _ in 0..4.min(planned.len().max(1)) {
+                    let queue = queue.clone();
+                    let out = out.clone();
+                    let cc_out = cc_out.clone();
+                    let first_err = first_err.clone();
+                    let root = root.clone();
+                    s.spawn(move || {
+                        loop {
+                            let item = { queue.lock().unwrap().pop_back() };
+                            let Some((idx, rel, n, is_cc)) = item else { break };
+                            let abs = abs_join(&root, &rel);
+                            let r = self
+                                .with_api(|a| a.get_content(&n.content_hash, &abs, n.mtime))
+                                .and_then(|_| hash_and_size(&abs))
+                                .map(|(h, size)| {
+                                    (idx, Rec { node_id: if is_cc { 0 } else { n.id }, hash: h, size, mtime: n.mtime, kind: protocol::TYPE_FILE.into() })
+                                });
+                            match r {
+                                Ok(v) => {
+                                    out.lock().unwrap().push((idx, v.1));
+                                    if is_cc {
+                                        cc_out.lock().unwrap().push((rel, n.content_hash.clone()));
+                                    }
+                                }
+                                Err(e) => {
+                                    let mut g = first_err.lock().unwrap();
+                                    if g.is_none() {
+                                        *g = Some(format!("download {rel}: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+        if let Some(e) = first_err.lock().unwrap().take() {
+            return Err(ysync_core::Error::Msg(e));
+        }
+        // 串行落账（快）：state/scan/new_files
+        let done = out.lock().unwrap();
+        let mut done_sorted: Vec<(usize, Rec)> =
+            done.iter().map(|(i, r)| (*i, r.clone())).collect();
+        done_sorted.sort_by_key(|(i, _)| *i);
+        for (idx, rec) in &done_sorted {
+            let (rel, _, is_cc) = &planned[*idx];
+            state_set.insert(rel.clone(), rec.clone());
+            scan.insert(rel.clone(), DiskInfo { size: rec.size, mtime: rec.mtime, is_dir: false });
+            if *is_cc {
+                // 冲突副本回传服务端（put 新建），其他设备可见
+                new_files.insert(rel.clone(), rec.hash.clone());
+            }
+        }
+        stats.downloaded += done_sorted.len() as i64;
+        drop(done);
 
         // 9. 上行之内容上传（去重）
         let node_at: HashMap<String, i64> =
@@ -890,21 +960,27 @@ impl Engine {
         let snap = crate::ctx::snapshot();
         let chunk_threshold = snap.chunk_threshold_mb << 20;
         let chunk_size = snap.chunk_size_mb << 20;
+        // 大文件分块：保持顺序（会话状态机依赖主线程的 st）；普通小文件并行（P1）
+        let mut plain: Vec<(String, String)> = Vec::new();
         for (rel, hash) in &uploads {
             let abs = abs_join(&root, rel);
             let size = scan.get(rel).map(|d| d.size).unwrap_or(0);
-            let got_hash;
             if size >= chunk_threshold {
                 // FR-S11：大文件分块上传 + 断点续传
                 let sess = st.get_upload_session(rel, hash);
                 let (sess_after, res) = {
-                    let mut a = self.api.lock().unwrap();
+                    let a = &*self.api;
                     a.put_content_chunked(&abs, sess.as_deref(), hash, size, chunk_size)
                 };
                 match res {
                     Ok(h) => {
                         let _ = st.clear_upload_session(rel, hash);
-                        got_hash = h;
+                        if h != *hash {
+                            return Err(ysync_core::Error::Msg(format!(
+                                "upload {rel}: hash changed during sync"
+                            )));
+                        }
+                        stats.uploaded += 1;
                     }
                     Err(e) => {
                         if !sess_after.is_empty() {
@@ -914,15 +990,56 @@ impl Engine {
                     }
                 }
             } else {
-                let (h, _) = self.with_api(|a| a.put_content(&abs, hash))?;
-                got_hash = h;
+                plain.push((rel.clone(), hash.clone()));
             }
-            if got_hash != *hash {
-                return Err(ysync_core::Error::Msg(format!(
-                    "upload {rel}: hash changed during sync"
-                )));
+        }
+        // 普通上传并行：4 线程消费队列（内容去重由服务端完成）
+        {
+            let q: Arc<Mutex<std::collections::VecDeque<(String, String)>>> = Arc::new(
+                Mutex::new(plain.into_iter().collect()),
+            );
+            let first_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let okcnt = Arc::new(std::sync::atomic::AtomicI64::new(0));
+            std::thread::scope(|s| {
+                for _ in 0..4 {
+                    let q = q.clone();
+                    let fe = first_err.clone();
+                    let ok = okcnt.clone();
+                    let root = root.clone();
+                    let api = self.api.clone();
+                    s.spawn(move || loop {
+                        let item = { q.lock().unwrap().pop_back() };
+                        let Some((rel, want)) = item else { break };
+                        let abs = abs_join(&root, &rel);
+                        let r = api
+                            .put_content(&abs, &want)
+                            .and_then(|(h, _)| {
+                                if h == want {
+                                    Ok(())
+                                } else {
+                                    Err(ysync_core::Error::Msg(format!(
+                                        "upload {rel}: hash changed during sync"
+                                    )))
+                                }
+                            });
+                        match r {
+                            Ok(()) => {
+                                ok.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                let mut g = fe.lock().unwrap();
+                                if g.is_none() {
+                                    *g = Some(format!("upload {rel}: {e}"));
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            if let Some(e) = first_err.lock().unwrap().take() {
+                return Err(ysync_core::Error::Msg(e));
             }
-            stats.uploaded += 1;
+            stats.uploaded += okcnt.load(std::sync::atomic::Ordering::Relaxed);
         }
 
         // 10. 上行之元数据操作（mkdir → unlink → move → put）

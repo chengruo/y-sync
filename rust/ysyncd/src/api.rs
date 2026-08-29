@@ -6,8 +6,9 @@ use ysync_core::protocol::*;
 use ysync_core::{Error, Result};
 
 pub struct Api {
-    pub base: String,
-    pub token: String,
+    /// 连接参数内部可变（热重载；P1 并行化前提：去掉 Engine 外层互斥）
+    pub base: std::sync::Mutex<String>,
+    pub token: std::sync::Mutex<String>,
     /// 元数据请求：短超时（C5），避免挂起请求阻塞整轮同步
     http: reqwest::blocking::Client,
     /// 内容传输：长超时
@@ -94,8 +95,8 @@ impl Api {
             base = format!("http://{base}");
         }
         Api {
-            base,
-            token: token.to_string(),
+            base: std::sync::Mutex::new(base),
+            token: std::sync::Mutex::new(token.to_string()),
             http: reqwest::blocking::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -124,10 +125,22 @@ impl Api {
         self.req_on(&self.http_long, method, path, body)
     }
 
+    pub fn get_base(&self) -> String {
+        self.base.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+    pub fn get_token(&self) -> String {
+        self.token.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+    /// 热重载连接参数（A7）。
+    pub fn set_connection(&self, base: &str, token: &str) {
+        *self.base.lock().unwrap_or_else(|p| p.into_inner()) = base.trim_end_matches('/').to_string();
+        *self.token.lock().unwrap_or_else(|p| p.into_inner()) = token.to_string();
+    }
+
     fn req_on(&self, client: &reqwest::blocking::Client, method: &str, path: &str, body: Option<Vec<u8>>) -> reqwest::blocking::RequestBuilder {
-        let url = format!("{}{}", self.base, path);
+        let url = format!("{}{}", self.get_base(), path);
         let mut rb = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), &url);
-        rb = rb.header("Authorization", format!("Bearer {}", self.token));
+        rb = rb.header("Authorization", format!("Bearer {}", self.get_token()));
         if let Some(b) = body {
             rb = rb.body(b);
         }
@@ -225,8 +238,8 @@ impl Api {
         };
         let resp = self
             .http_long
-            .put(format!("{}/api/v1/content", self.base))
-            .header("Authorization", format!("Bearer {}", self.token))
+            .put(format!("{}/api/v1/content", self.get_base()))
+            .header("Authorization", format!("Bearer {}", self.get_token()))
             .header("X-Content-SHA256", &hash)
             .body(reqwest::blocking::Body::sized(reader, size as u64))
             .send()?;
@@ -247,9 +260,11 @@ impl Api {
             )
             .send()?;
         let mut resp = check(resp)?;
+        static DL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let tmp_path = dest.with_file_name(format!(
-            ".ysync-dl-{}",
-            std::process::id()
+            ".ysync-dl-{}-{}",
+            std::process::id(),
+            DL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         {
             let mut tmp = std::fs::File::create(&tmp_path)?;
@@ -433,7 +448,12 @@ impl Api {
             )
             .send()?;
         let mut resp = check(resp)?;
-        let tmp = dest.with_file_name(format!(".ysync-ver-{}", std::process::id()));
+        static VER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let tmp = dest.with_file_name(format!(
+            ".ysync-ver-{}-{}",
+            std::process::id(),
+            VER_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         {
             let mut f = std::fs::File::create(&tmp)?;
             let limiter = self.download_limiter.clone();

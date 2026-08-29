@@ -1,6 +1,9 @@
 //! 内容寻址 blob 存储（SR4）：SHA-256 命名、两层目录散列、临时文件 + 原子 rename。
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use crate::util::{hex, valid_hash};
 
@@ -34,15 +37,19 @@ impl BlobStore {
         use sha2::Digest;
         let tmp_dir = self.root.join("tmp");
         std::fs::create_dir_all(&tmp_dir)?;
+        // 原子序号保证并发 PUT 的临时文件唯一（nanos 在快速循环里会撞名）
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp_path = tmp_dir.join(format!(
-            "upload-{}-{}",
+            "upload-{}-{}-{}",
             std::process::id(),
+            seq,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0)
         ));
         let mut tmp = std::fs::File::create(&tmp_path)?;
+        tmp.write_all(b"")?; // 保持 Write trait 导入
         let mut hasher = sha2::Sha256::new();
         let mut size = 0i64;
         let mut buf = [0u8; 256 * 1024];

@@ -159,6 +159,8 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         store,
         login_guard: httpd::LoginGuard::new(),
         share_guard: httpd::ShareGuard::new(),
+        bytes_in: std::sync::atomic::AtomicU64::new(0),
+        bytes_out: std::sync::atomic::AtomicU64::new(0),
         http_stats: httpd::HttpStats::new(),
         started_at: std::time::Instant::now(),
         audit_path: data_dir().join("audit.log"),

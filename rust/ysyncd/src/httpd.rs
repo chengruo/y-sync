@@ -196,6 +196,44 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
                 Err(e) => respond(request, 400, &e, "text/plain"),
             }
         }
+        (Method::Get, "/server-trash") => {
+            let items = daemon.server_trash_list().unwrap_or_default();
+            respond(request, 200, &serde_json::to_string(&serde_json::json!({ "items": items })).unwrap(), "application/json")
+        }
+        (Method::Post, "/trash-restore") => {
+            let id = json_num("id", &body);
+            match daemon.server_trash_restore(id) {
+                Ok(()) => { let d = daemon.clone(); std::thread::spawn(move || d.sync_all()); respond(request, 200, "{\"ok\":true}", "application/json") }
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
+        (Method::Post, "/trash-delete") => {
+            let id = json_num("id", &body);
+            match daemon.server_trash_delete(id) {
+                Ok(()) => respond(request, 200, "{\"ok\":true}", "application/json"),
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
+        (Method::Get, "/versions") => {
+            let folder = query.split('&').find_map(|kv| kv.strip_prefix("folder=")).unwrap_or("");
+            let folder = urlencoding::decode(folder).unwrap_or_default().to_string();
+            let rel = query.split('&').find_map(|kv| kv.strip_prefix("rel=")).unwrap_or("");
+            let rel = urlencoding::decode(rel).unwrap_or_default().to_string();
+            match daemon.server_versions(&folder, &rel) {
+                Ok((_, versions)) => respond(request, 200, &serde_json::to_string(&serde_json::json!({ "versions": versions })).unwrap(), "application/json"),
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
+        (Method::Post, "/version-restore") => {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            let folder = v.get("folder").and_then(|x| x.as_str()).unwrap_or("");
+            let rel = v.get("rel").and_then(|x| x.as_str()).unwrap_or("");
+            let vid = v.get("version_id").and_then(|x| x.as_i64()).unwrap_or(-1);
+            match daemon.server_version_restore(folder, rel, vid) {
+                Ok(()) => { let d = daemon.clone(); std::thread::spawn(move || d.sync_all()); respond(request, 200, "{\"ok\":true}", "application/json") }
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
         (Method::Post, "/remove") => {
             let name = json_field_str("name");
             match daemon.remove_folder(&name) {
@@ -271,6 +309,17 @@ const GO_PAGE: &str = r##"<!doctype html>
 
 <h2>待处理冲突 <span id="ccount" style="font-weight:normal;color:#57606a"></span></h2>
 <div id="conflicts"></div>
+
+<h2>服务端回收站</h2>
+<div id="strash"></div>
+
+<h2>文件版本</h2>
+<div class="card">
+ <label>文件夹</label><input type="text" id="v-folder" placeholder="proj" style="width:20%">
+ <label>相对路径</label><input type="text" id="v-rel" placeholder="src/main.rs" style="width:45%">
+ <button onclick="loadVersions()">查看版本</button>
+</div>
+<div id="vlist"></div>
 
 <h2>设备 <span id="devcount" style="font-weight:normal;color:#57606a"></span></h2>
 <div id="devices"></div>
@@ -362,6 +411,11 @@ async function refresh() {
     }
   } catch (e) {}
 }
+async function trashOp(op, id) {
+  const r = await F("/trash-" + op, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id})});
+  if (!r.ok) msg("失败: " + await r.text()); else msg("回收站操作完成");
+  refresh();
+}
 async function revoke(id) {
   if (!confirm("吊销设备 #" + id + "？（其 token 立即失效）")) return;
   const r = await F("/devices/" + id, {method: "DELETE"});
@@ -401,8 +455,41 @@ async function resolve(folder, rel, copyRel, choice) {
   if (!r.ok) msg("失败: " + await r.text()); else msg("冲突已处理，同步传播中");
   refresh();
 }
+async function loadVersions() {
+  const folder = document.getElementById("v-folder").value.trim();
+  const rel = document.getElementById("v-rel").value.trim();
+  if (!folder || !rel) { msg("请填写文件夹与路径"); return; }
+  try {
+    const v = await (await F("/versions?folder=" + encodeURIComponent(folder) + "&rel=" + encodeURIComponent(rel))).json();
+    const box = document.getElementById("vlist");
+    box.innerHTML = (v.versions||[]).length ? "" : '<div style="font-size:13px">无历史版本</div>';
+    for (const it of v.versions||[]) {
+      box.insertAdjacentHTML("beforeend",
+        '<div class="card">#' + it.id + " " + (it.size/1024).toFixed(1) + " KB · " +
+        new Date(it.created * 1000).toLocaleString() +
+        ' <button onclick=\'restoreVersion("' + esc(folder) + '","' + esc(rel) + '",' + it.id + ')\'>回写此版本</button></div>');
+    }
+  } catch (e) { msg("版本查询失败: " + e); }
+}
+async function restoreVersion(folder, rel, vid) {
+  const r = await F("/version-restore", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({folder, rel, version_id: vid})});
+  if (!r.ok) msg("回写失败: " + await r.text()); else msg("版本已回写本地，同步后上传");
+}
 function esc(s) { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
 function msg(t) { document.getElementById("msg").textContent = t; }
 refresh();
 setInterval(refresh, 3000);
 </script></body></html>"##;
+
+
+/// 从 JSON body 取数值字段（兼容数字/数字字符串）。
+fn json_num(field: &str, body: &str) -> i64 {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| match v.get(field) {
+            Some(serde_json::Value::Number(n)) => n.as_i64(),
+            Some(serde_json::Value::String(s)) => s.parse().ok(),
+            _ => None,
+        })
+        .unwrap_or(-1)
+}

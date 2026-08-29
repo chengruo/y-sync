@@ -56,17 +56,7 @@ impl Daemon {
         // 热重载后新文件夹需要进入状态快照（/status 可见性）
         self.state.init_folders(&ctx::snapshot().folders);
         // 热重载后同步 engine 连接参数（A7：server_url/token 变更即时生效）
-        {
-            let mut a = self.engine.as_ref().api_lock();
-            ctx::with_cfg(|c| {
-                if a.base != c.server_url {
-                    a.base = c.server_url.clone();
-                }
-                if a.token != c.token {
-                    a.token = c.token.clone();
-                }
-            });
-        }
+        ctx::with_cfg(|c| self.engine.api.set_connection(&c.server_url, &c.token));
         // 新增文件夹补挂 FS 监听（独立 watcher，事件并入同一防抖循环）
         if let Some(tx) = self.watch_tx.lock().unwrap().clone() {
             let folders = ctx::with_cfg(|c| c.folders.clone());
@@ -224,6 +214,49 @@ impl Daemon {
         }
         *slot = Some(w);
         self.log("level=INFO msg=\"FS 事件监听已启用\"".into());
+    }
+
+    // ---------- 服务端数据管理（P1：管理台代理服务端 API） ----------
+
+    pub fn server_trash_list(&self) -> Result<Vec<ysync_core::protocol::TrashItem>, String> {
+        self.engine.api.trash_list().map_err(|e| format!("{e:?}"))
+    }
+    pub fn server_trash_restore(&self, id: i64) -> Result<(), String> {
+        self.engine.api.trash_restore(id).map_err(|e| format!("{e:?}"))
+    }
+    pub fn server_trash_delete(&self, id: i64) -> Result<(), String> {
+        self.engine.api.trash_delete(id).map_err(|e| format!("{e:?}"))
+    }
+    pub fn server_versions(&self, folder: &str, rel: &str) -> Result<(i64, Vec<ysync_core::protocol::VersionItem>), String> {
+        let target = format!("{folder}/{rel}");
+        let node = self
+            .engine
+            .api
+            .nodes()
+            .map_err(|e| format!("{e:?}"))?
+            .into_iter()
+            .find(|n| n.path == target)
+            .ok_or_else(|| format!("服务端不存在 {rel:?}"))?;
+        let versions = self
+            .engine
+            .api
+            .node_versions(node.id)
+            .map_err(|e| format!("{e:?}"))?;
+        Ok((node.id, versions))
+    }
+    pub fn server_version_restore(&self, folder: &str, rel: &str, version_id: i64) -> Result<(), String> {
+        let local = ctx::with_cfg(|c| {
+            c.folders
+                .iter()
+                .find(|f| f.name == folder)
+                .map(|f| f.local_path.clone())
+        })
+        .ok_or_else(|| format!("文件夹 {folder:?} 不存在"))?;
+        let dest = std::path::Path::new(&local).join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        self.engine
+            .api
+            .download_version_to(version_id, &dest, 0)
+            .map_err(|e| format!("{e:?}"))
     }
 
     // ---------- 管理操作 ----------
@@ -406,7 +439,7 @@ impl Daemon {
         {
             let me = self.clone();
             let api = self.engine.api.clone();
-            std::thread::spawn(move || ws_loop(&api, move || me.sync_all()));
+            std::thread::spawn(move || ws_loop(api, move || me.sync_all()));
         }
 
         // setup 模式：等待用户经管理台完成首次配置，再拉起同步循环
@@ -482,7 +515,7 @@ fn files_tracked(local: &str) -> i64 {
 }
 
 /// WS 订阅循环（tokio-tungstenite；断线重连指数退避封顶 30s）。
-fn ws_loop(api: &Arc<Mutex<crate::api::Api>>, on_notify: impl Fn() + Send + 'static) {
+fn ws_loop(api: Arc<crate::api::Api>, on_notify: impl Fn() + Send + 'static) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -491,9 +524,8 @@ fn ws_loop(api: &Arc<Mutex<crate::api::Api>>, on_notify: impl Fn() + Send + 'sta
         let mut backoff = 1u64;
         loop {
             let url = {
-                let a = api.lock().unwrap_or_else(|p| p.into_inner());
-                let ws_base = a.base.replacen("http", "ws", 1);
-                format!("{ws_base}/api/v1/notify?token={}", a.token)
+                let ws_base = api.get_base().replacen("http", "ws", 1);
+                format!("{ws_base}/api/v1/notify?token={}", api.get_token())
             };
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((mut ws, _)) => {

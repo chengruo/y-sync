@@ -5,7 +5,7 @@ pub mod control;
 pub mod protocol;
 
 pub use config::{
-    clear_daemon_info, config_path, default_device_name, is_sub_path, load_config,
+    clear_daemon_info, config_dir, config_path, default_device_name, is_sub_path, load_config,
     read_daemon_info, save_config, write_daemon_info, Config, DaemonInfo, Folder,
 };
 pub use control::ControlClient;
