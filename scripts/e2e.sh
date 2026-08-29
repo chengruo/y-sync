@@ -80,6 +80,7 @@ check "ignore: .syncignore 本身同步" "test -f "$WORK/B/proj/.syncignore""
 # mtime 保留（FR-S10）
 mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
 M1=$(mtime_of "$WORK/A/proj/a.txt"); M2=$(mtime_of "$WORK/B/proj/a.txt")
+say "    (mtime A=$M1 B=$M2)"
 check "mtime 保留" "[ "$M1" = "$M2" ]"
 
 # ---------- 增量：修改 / 删除 / 重命名 ----------
