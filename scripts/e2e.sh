@@ -283,8 +283,10 @@ echo "B-side" > "$WORK/B/notes/n1.md"
 $YS_B sync >/dev/null 2>&1
 R=$(api_post resume '{"folder":"notes"}')
 check "恢复文件夹 (POST /resume)" 'echo "$R" | grep -q ok'
-R=$(api_post sync '{"folder":"notes"}')
-wait_for "恢复后产生冲突副本" 25 "ls "$WORK/A/notes" | grep -q 'conflict from'"
+R=$(api_post sync '{"folder":"notes"}')   # 主动触发，不等 60s 轮询（CI runner 慢）
+sleep 2
+R=$(api_post sync '{"folder":"notes"}')   # 二次触发（首个请求可能因 setup 忙略过）
+wait_for "恢复后产生冲突副本" 40 "ls "$WORK/A/notes" | grep -q 'conflict from'"
 CINFO=$(curl -s "http://127.0.0.1:18731/conflicts?token=$DAEMON_TOKEN" | python3 -c "
 import json,sys
 c=[x for x in json.load(sys.stdin)['conflicts'] if x['folder']=='notes']
