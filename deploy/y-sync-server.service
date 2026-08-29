@@ -1,0 +1,28 @@
+# y-sync-server systemd 单元（部署到 /etc/systemd/system/y-sync-server.service）
+# 安全加固：只读文件系统 + 私有 tmp + 数据目录可写白名单（SR6/安全）
+[Unit]
+Description=y-sync 轻量文件同步服务端（Rust）
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=y-sync
+Group=y-sync
+ExecStart=/opt/y-sync/current/y-sync-server-rs serve -addr 127.0.0.1:8720 -data /var/lib/y-sync
+Environment=YSYNC_DATA=/var/lib/y-sync
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+# 安全加固
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/y-sync
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

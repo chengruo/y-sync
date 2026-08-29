@@ -163,6 +163,27 @@ e2e 提供 `wait_for` 轮询助手消除时序脆弱性；`E2E_KEEP=1` 保留现
 | M3 体验 | ✅ 选择性同步/限速/WS 通知/自启/backup/Web 管理台（状态监控 + 接入文件夹/处理冲突/暂停恢复；原生托盘壳以 Web 管理台代替，Tauri 留待评估） |
 | M4 扩展 | ✅ 分享链接/只读 WebDAV/浏览页（移动端评估：协议已具备弱网要素——增量+续传，原生 App 另行立项） |
 
+## 自动部署（服务器 + 域名）
+
+Rust 服务端支持一条命令部署到你的服务器（nginx 反代 + 已有 TLS 证书）：
+
+```bash
+# 一次性：服务器初始化（创建用户/目录/systemd/nginx 站点；证书用你已有的）
+DEPLOY_HOST=124.x.x.x BIN=bin/y-sync-server-rs-linux-amd64   bash scripts/deploy.sh bootstrap sync.example.com /etc/nginx/ssl/fullchain.pem /etc/nginx/ssl/privkey.pem
+
+# 日常：部署新版本（backup → 上传 → 原子切换 → 健康检查 → 失败自动回滚）
+DEPLOY_HOST=124.x.x.x bash scripts/deploy.sh
+```
+
+CI 自动部署：在 GitHub 仓库配置 Secrets（`DEPLOY_HOST` / `DEPLOY_USER` / `DEPLOY_KEY`）
+后，推送 `v*` tag 或手动触发 workflow 即自动构建部署；GitLab CI 对应 `rust-deploy`
+手动作业。本地手动部署可复制 `deploy/deploy.env.example` 为 `deploy/deploy.env`
+填入地址与私钥（已被 gitignore）。
+
+nginx 配置要点（模板已处理）：WebSocket 反代头（`/api/v1/notify`）、
+`client_max_body_size 0`（默认 1M 会 413 上传）、数据目录独立于部署（只换二进制）。
+每次部署前自动执行 `backup`（VACUUM INTO 快照 + blobs）。
+
 ## 已知限制
 
 - 分块上传会话在服务端重启后失效（客户端自动重建会话重传，内容去重降低代价）

@@ -242,7 +242,11 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
     let p = req.path.as_str();
 
     if m == "GET" && p == "/healthz" {
-        return ok_json(serde_json::json!({"status": "ok"}));
+        const VERSION: &str = match option_env!("Y_SYNC_VERSION") {
+            Some(v) => v,
+            None => env!("CARGO_PKG_VERSION"),
+        };
+        return ok_json(serde_json::json!({"status": "ok", "version": VERSION}));
     }
     if m == "POST" && p == "/api/v1/auth/login" {
         #[derive(serde::Deserialize)]

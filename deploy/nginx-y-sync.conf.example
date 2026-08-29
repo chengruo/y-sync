@@ -1,0 +1,50 @@
+# nginx 反代配置（写入 /etc/nginx/sites-available/y-sync，软链到 sites-enabled）
+# 占位符由 bootstrap/deploy 脚本替换：__DOMAIN__ __CERT__ __KEY__
+# 你已有证书：把 __CERT__/__KEY__ 指向证书文件即可（bootstrap.sh 会自动填充）。
+#
+# 三个关键点（缺一不可）：
+# 1. WebSocket：/api/v1/notify 是 WS 端点，必须带 Upgrade/Connection 头，否则
+#    客户端准实时通知退化为轮询；
+# 2. client_max_body_size：nginx 默认 1M，会 413 掉内容上传，必须放大；
+# 3. $connection_upgrade 需要 http 级别的 map（本文件已包含，sites-available
+#    的文件会被 include 进 http 上下文，位置合法）。
+
+# http 级别：WebSocket 连接升级映射
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name __DOMAIN__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name __DOMAIN__;
+
+    # 已有证书（bootstrap.sh 按参数填充；续期由你的证书管理方式负责）
+    ssl_certificate     __CERT__;
+    ssl_certificate_key __KEY__;
+
+    # 大文件上传（分块单请求 ≤8MB；0=不限制）
+    client_max_body_size 0;
+    proxy_request_buffering off;   # 流式转发，不在 nginx 落盘
+    proxy_read_timeout 30m;
+    proxy_send_timeout 30m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8720;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # WebSocket（/api/v1/notify）
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
