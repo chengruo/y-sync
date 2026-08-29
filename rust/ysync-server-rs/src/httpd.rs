@@ -682,16 +682,22 @@ fn serve_file_or_list(
     rel: &str,
 ) -> RouteResult {
     if n.kind == "dir" {
+        // 子路径部署友好：目录统一 301 到带尾斜杠的自身（相对 Location，
+        // 按当前 URL 的父目录解析，外部前缀如 /y-sync 由浏览器自行保留）
+        if !rel.is_empty() && !req.path.ends_with('/') {
+            let pwd = req.q("p").unwrap_or_default();
+            let loc = if pwd.is_empty() {
+                format!("{rel}/")
+            } else {
+                format!("{rel}/?p={pwd}")
+            };
+            return (301, "text/html".into(), Vec::new(), vec![("Location", loc)]);
+        }
         let nodes = state.store.nodes(user_id).unwrap_or_default();
         let prefix = if n.path.is_empty() {
             String::new()
         } else {
             format!("{}/", n.path)
-        };
-        let base = if rel.is_empty() {
-            format!("/s/{token}")
-        } else {
-            format!("/s/{token}/{rel}")
         };
         let pwd_q = req
             .q("p")
@@ -703,11 +709,7 @@ fn serve_file_or_list(
             html_escape(&n.path)
         );
         if !rel.is_empty() {
-            let parent = base
-                .rsplit_once('/')
-                .map(|(a, _)| a.to_string())
-                .unwrap_or_else(|| format!("/s/{token}"));
-            html.push_str(&format!(r#"<li><a href="{parent}{pwd_q}">../</a></li>"#));
+            html.push_str(&format!(r#"<li><a href="../{pwd_q}">../</a></li>"#));
         }
         for k in &nodes {
             if !prefix.is_empty() {
@@ -721,17 +723,13 @@ fn serve_file_or_list(
             if child_rel.contains('/') {
                 continue; // 仅当前层
             }
-            let href = if prefix.is_empty() {
-                format!("/s/{token}/{child_rel}")
-            } else {
-                format!("{base}/{child_rel}")
-            };
+            let href = format!("{child_rel}{pwd_q}");
             let label = if k.kind == "dir" {
-                format!("{}{}", html_escape(&child_rel), "/")
+                format!("{}/", html_escape(&child_rel))
             } else {
                 format!("{} ({:.1} KB)", html_escape(&child_rel), k.size as f64 / 1024.0)
             };
-            html.push_str(&format!(r#"<li><a href="{href}{pwd_q}">{label}</a></li>"#));
+            html.push_str(&format!(r#"<li><a href="{href}">{label}</a></li>"#));
         }
         html.push_str("</ul>");
         return (200, "text/html; charset=utf-8".into(), html.into_bytes(), vec![]);
@@ -779,19 +777,18 @@ fn handle_browse(state: &ServerState, req: &Request) -> RouteResult {
     let path = req.q("path").unwrap_or_default();
     let path = path.trim_matches('/').to_string();
     let nodes = state.store.nodes(uid).unwrap_or_default();
+    // 相对链接（子路径部署友好）：子目录走 path 查询参数，文件直接相对引用
     let mut html = format!(
         "<!doctype html><meta charset=utf-8><title>y-sync 浏览</title><h3>/{}§</h3><ul>",
         html_escape(&path)
     );
     html = html.replace('\u{a7}', "");
+    let parent_q = match path.rfind('/') {
+        Some(i) => format!("?token={token}&path={}", &path[..i]),
+        None => format!("?token={token}"),
+    };
     if !path.is_empty() {
-        let parent = match path.rfind('/') {
-            Some(i) => path[..i].to_string(),
-            None => String::new(),
-        };
-        html.push_str(&format!(
-            r#"<li><a href="/browse?token={token}&path={parent}">../</a></li>"#
-        ));
+        html.push_str(&format!(r#"<li><a href="{parent_q}">../</a></li>"#));
     }
     let prefix = if path.is_empty() {
         String::new()
@@ -811,14 +808,14 @@ fn handle_browse(state: &ServerState, req: &Request) -> RouteResult {
         let rel = n.path.trim_start_matches(&prefix).to_string();
         if n.kind == "dir" {
             html.push_str(&format!(
-                r#"<li><a href="/browse?token={token}&path={}">{}/</a></li>"#,
-                n.path,
+                r#"<li><a href="{}/">{}/</a></li>"#,
+                urlencoding::encode(&n.path),
                 html_escape(&rel)
             ));
         } else {
             html.push_str(&format!(
-                r#"<li><a href="/api/v1/content/{}?token={}">{} ({:.1} KB)</a></li>"#,
-                n.content_hash,
+                r#"<li><a href="{}?token={}">{} ({:.1} KB)</a></li>"#,
+                urlencoding::encode(&n.path),
                 token,
                 html_escape(&rel),
                 n.size as f64 / 1024.0

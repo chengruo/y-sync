@@ -8,6 +8,7 @@
 #
 # 环境变量:
 #   DEPLOY_HOST      服务器地址（必填；CI 配 Secrets，本地放 deploy/deploy.env）
+#   DEPLOY_PORT      SSH 端口（默认 22）
 #   DEPLOY_USER      SSH 用户（默认 ubuntu）
 #   DEPLOY_KEY_FILE  SSH 私钥路径；或 DEPLOY_KEY（私钥内容，CI Secrets 用）
 #   DEPLOY_VERSION   版本标识（默认 git describe；CI 传 tag）
@@ -23,6 +24,7 @@ cd "$ROOT"
 DRY_RUN="${DEPLOY_DRY_RUN:-0}"
 [ -f deploy/deploy.env ] && source deploy/deploy.env
 DEPLOY_HOST="${DEPLOY_HOST:?需要 DEPLOY_HOST（服务器地址）}"
+DEPLOY_PORT="${DEPLOY_PORT:-22}"
 DEPLOY_USER="${DEPLOY_USER:-ubuntu}"
 DEPLOY_VERSION="${DEPLOY_VERSION:-$(git -C "$ROOT" describe --tags --always 2>/dev/null || echo dev)}"
 DEPLOY_VERSION="${DEPLOY_VERSION#v}"
@@ -36,7 +38,7 @@ elif [ -n "${DEPLOY_KEY_FILE:-}" ]; then
   SSH_KEY_ARGS=(-i "$DEPLOY_KEY_FILE")
 fi
 # bash 3.2 兼容：空数组在 set -u 下的展开需要 guard
-SSH_OPTS=(${SSH_KEY_ARGS[@]+"${SSH_KEY_ARGS[@]}"} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+SSH_OPTS=(${SSH_KEY_ARGS[@]+"${SSH_KEY_ARGS[@]}"} -p "$DEPLOY_PORT" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 
 ssh_run() { # 单条远程命令
   if [ "$DRY_RUN" = "1" ]; then
