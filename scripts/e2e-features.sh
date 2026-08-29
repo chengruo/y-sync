@@ -15,10 +15,21 @@ say(){ echo -e "$1"; }
 ok(){ PASS=$((PASS+1)); say "  \033[32mPASS\033[0m $1"; }
 bad(){ FAIL=$((FAIL+1)); say "  \033[31mFAIL\033[0m $1"; }
 check(){ if eval "$2"; then ok "$1"; else bad "$1 — [$2]"; fi }
+wait_for(){
+  local desc="$1" t="$2" cond="$3" end
+  end=$((SECONDS + t))
+  while [ "$SECONDS" -lt "$end" ]; do
+    if eval "$cond" >/dev/null 2>&1; then ok "$desc"; return 0; fi
+    sleep 0.3
+  done
+  bad "$desc — 超时 [${cond}]"
+  return 1
+}
 
 cleanup(){ [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null; [ -n "${E2E_KEEP:-}" ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
+
 pkill -f y-sync-server-rs 2>/dev/null; sleep 0.2
 
 say "== 特性验证: server=$(basename "$SERVER_BIN") client=$(basename "$CLIENT") =="
@@ -28,18 +39,26 @@ SERVER_PID=$!
 for i in $(seq 1 50); do curl -s "http://$SRV_ADDR/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
 
 YS="env YSYNC_CONFIG_DIR=$WORK/cfg $CLIENT"
+YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $CLIENT"
 
 # ---------- 设备管理（P1-6） ----------
 YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" adduser alice <<<"secret123" >/dev/null 2>&1
 mkdir -p "$WORK/proj"; echo hello > "$WORK/proj/a.txt"
 $YS init -server "http://$SRV_ADDR" -user alice -device devMain <<<"secret123" >/dev/null 2>&1
+$YS_B init -server "http://$SRV_ADDR" -user alice -device devB <<<"secret123" >/dev/null 2>&1
+mkdir -p "$WORK/B"
+$YS_B add "$WORK/B/proj" --as proj >/dev/null
+$YS_B sync >/dev/null 2>&1
 $YS add "$WORK/proj" >/dev/null && $YS sync >/dev/null 2>&1
 check "设备列表包含当前设备" "$YS devices | grep -q '当前设备'"
-# 登录第二台设备并吊销
-$YS init -server "http://$SRV_ADDR" -user alice -device devGhost <<<"secret123" >/dev/null 2>&1
+# 登录第二台设备并吊销（ghost 用独立配置目录，避免覆盖主设备 token）
+mkdir -p "$WORK/cfgghost"
+YS_GHOST="env YSYNC_CONFIG_DIR=$WORK/cfgghost $CLIENT"
+$YS_GHOST init -server "http://$SRV_ADDR" -user alice -device devGhost <<<"secret123" >/dev/null 2>&1
 DEV_ID=$($YS devices | grep devGhost | awk '{print $1}' | head -1)
 check "设备列表包含第二台" "[ -n "$DEV_ID" ]"
 $YS revoke "$DEV_ID" >/dev/null && ok "吊销 API 成功"
+$YS_GHOST devices >/dev/null 2>&1 && bad "吊销后 ghost 仍可用" || ok "吊销后 ghost token 立即失效"
 TOK_GHOST=$($YS devices >/dev/null 2>&1; python3 -c "pass" 2>/dev/null; echo "")
 # devGhost 的 token 已失效：用其重新 init 验证（应 401 → init 失败）
 
@@ -54,6 +73,60 @@ check "metrics: HTTP 计数"     'echo "$M" | grep -q "^ysync_http_requests_tota
 check "审计日志存在"           "test -f $SRV_DATA/audit.log"
 check "审计含 op_put"          "grep -q 'op_put' $SRV_DATA/audit.log"
 check "审计含 login"           "grep -q '\"event\":\"login\"' $SRV_DATA/audit.log"
+
+# ---------- setup 模式（UI 配置访问）----------
+mkdir -p "$WORK/setup"
+YS_SETUP="env YSYNC_CONFIG_DIR=$WORK/cfgsetup $CLIENT"
+$YS_SETUP daemon -http 127.0.0.1:18799 -interval 60s >"$WORK/setup-daemon.log" 2>&1 &
+SETUP_PID=$!
+wait_for "setup daemon 启动" 10 "test -f $WORK/cfgsetup/daemon.json"
+SETUP_TOKEN=$(python3 -c "import json;print(json.load(open('$WORK/cfgsetup/daemon.json'))['token'])")
+check "setup 状态: 未初始化"   'curl -s "http://127.0.0.1:18799/setup-status?token='"$SETUP_TOKEN"'" | grep -q initialized.:false'
+SETUP_BODY="{\"server_url\":\"http://$SRV_ADDR\",\"user\":\"alice\",\"password\":\"secret123\",\"device_name\":\"devSetup\"}"
+SETUP_R=$(curl -s -m 15 -X POST "http://127.0.0.1:18799/setup?token=$SETUP_TOKEN" -H "Content-Type: application/json" -d "$SETUP_BODY")
+check "setup 完成配置 (POST /setup)"   'echo "$SETUP_R" | grep -q initialized'
+check "setup 后配置文件落盘" "test -f $WORK/cfgsetup/config.json"
+check "setup 状态: 已初始化"   'curl -s "http://127.0.0.1:18799/setup-status?token='"$SETUP_TOKEN"'" | grep -q initialized.:true'
+mkdir -p "$WORK/setup-f"
+echo "setup-f" > "$WORK/setup-f/s.txt"
+$YS_SETUP add "$WORK/setup-f" >/dev/null
+SETUP_STATUS=$(curl -s -m 5 "http://127.0.0.1:18799/status?token=$SETUP_TOKEN")
+curl -s -m 5 -X POST "http://127.0.0.1:18799/sync?token=$SETUP_TOKEN" >/dev/null
+sleep 2
+SETUP_STATUS=$(curl -s -m 5 "http://127.0.0.1:18799/status?token=$SETUP_TOKEN")
+check "setup 后 daemon 拉起同步" 'echo "$SETUP_STATUS" | grep -q setup-f'
+kill "$SETUP_PID" 2>/dev/null; wait "$SETUP_PID" 2>/dev/null
+
+# ---------- 日志水位（A1）----------
+WM=$(curl -s "http://$SRV_ADDR/api/v1/sync/head?token=$(
+  python3 -c "import json;print(json.load(open('$WORK/cfg/config.json'))['token'])")" | python3 -c "import json,sys;print(json.load(sys.stdin).get('watermark', -1))")
+check "head 返回 watermark 字段" "[ "$WM" -ge 0 ]"
+
+# ---------- 日志水位触发全量重同步（A1）----------
+YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $CLIENT"
+kill "$SERVER_PID" 2>/dev/null; sleep 0.3
+YSYNC_JOURNAL_KEEP=5 YSYNC_JOURNAL_TRIM_MIN=0 YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
+SERVER_PID=$!
+wait_for "服务端重启（保留 5 条日志）" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
+mkdir -p "$WORK/A/wm"
+for i in $(seq 1 10); do echo "wm-$i" > "$WORK/A/wm/f$i.txt"; done
+$YS add "$WORK/A/wm" --as wm >/dev/null
+# A 端 10 个 put → 日志条数超过 keep=5 → 触发裁剪 → watermark 前移
+$YS sync >/dev/null 2>&1
+WM=$(curl -s "http://$SRV_ADDR/api/v1/sync/head?token=$(
+  python3 -c "import json;print(json.load(open('$WORK/cfgB/config.json'))['token'])")" | python3 -c "import json,sys;print(json.load(sys.stdin).get('watermark', -1))")
+check "裁剪后 watermark 前移 (>0)" "[ "$WM" -gt 0 ]"
+# B 的游标落在水位之下 → 下次 sync 必须全量重同步且收敛
+# B 端需先 add wm 子树（A 侧新增的文件夹对 B 是新顶层）
+mkdir -p "$WORK/B/wm"
+$YS_B add "$WORK/B/wm" --as wm >/dev/null
+$YS_B sync >/dev/null 2>&1 && ok "水位下客户端全量重同步成功" || bad "水位下客户端全量重同步成功"
+check "重同步后 B 数据完整" "[ $(find "$WORK/B/wm" -name 'f*.txt' | wc -l) -eq 10 ]"
+# 恢复无限制服务端（后续场景不受影响）
+kill "$SERVER_PID" 2>/dev/null; sleep 0.3
+YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
+SERVER_PID=$!
+wait_for "服务端恢复" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
 
 # ---------- 登录暴力破解防护（P0-3） ----------
 for i in 1 2 3 4 5; do

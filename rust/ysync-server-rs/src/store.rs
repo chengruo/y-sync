@@ -190,7 +190,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS shares(
                id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, token TEXT NOT NULL UNIQUE,
                node_id INTEGER NOT NULL, password_hash TEXT NOT NULL DEFAULT '',
-               expires_at INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);",
+               expires_at INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS meta(
+               key TEXT PRIMARY KEY, value TEXT NOT NULL);",
         )
         .map_err(to_serr)?;
         // 幂等迁移：quota_bytes（P1-8）
@@ -557,12 +559,15 @@ impl Store {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn apply_op(
         tx: &Transaction,
         s: &Store,
         user_id: i64,
         device_id: i64,
         op: &ysync_core::protocol::Op,
+        quota_state: Option<&(i64, i64)>,
+        quota_delta: &mut i64,
     ) -> Result<(i64, i64), String> {
         match op.op.as_str() {
             "mkdir" => {
@@ -600,18 +605,9 @@ impl Store {
                     )
                     .map_err(|_| "content not uploaded yet".to_string())?;
                 let size = if op.size == 0 { bsize } else { op.size };
-                // 配额强制（P1-8）：quota_bytes=0 表示不限；按增量计算（新建/覆盖）
-                let quota: i64 = tx
-                    .query_row("SELECT quota_bytes FROM users WHERE id=?1", [user_id], |r| r.get(0))
-                    .map_err(to_serr)?;
-                if quota > 0 {
-                    let used: i64 = tx
-                        .query_row(
-                            "SELECT COALESCE(SUM(size),0) FROM nodes WHERE user_id=?1 AND type='file'",
-                            [user_id],
-                            |r| r.get(0),
-                        )
-                        .map_err(to_serr)?;
+                // 配额强制（P1-8）：quota_bytes=0 不限；used 为批次起点快照，
+                // delta 累计同批次前序 put 的增量（替换旧文件记差值）
+                if let Some((quota, used)) = quota_state {
                     let replaced: i64 = if op.node_id > 0 {
                         tx.query_row(
                             "SELECT COALESCE(size,0) FROM nodes WHERE id=?1 AND type='file'",
@@ -620,10 +616,8 @@ impl Store {
                         )
                         .unwrap_or(0)
                     } else {
-                        let p_full = {
-                            let pp = Self::node_path(tx, user_id, op.parent_id)?;
-                            Self::join_path(&pp, &op.name)
-                        };
+                        let pp = Self::node_path(tx, user_id, op.parent_id)?;
+                        let p_full = Self::join_path(&pp, &op.name);
                         tx.query_row(
                             "SELECT COALESCE(size,0) FROM nodes WHERE user_id=?1 AND path=?2 AND type='file'",
                             rusqlite::params![user_id, p_full],
@@ -631,11 +625,12 @@ impl Store {
                         )
                         .unwrap_or(0)
                     };
-                    if used - replaced + size > quota {
+                    if *used + *quota_delta + size - replaced > *quota {
                         return Err(format!(
                             "quota exceeded: used {used}B, incoming {size}B, quota {quota}B"
                         ));
                     }
+                    *quota_delta += size - replaced;
                 }
                 if op.node_id > 0 {
                     let n = Self::node_by_id(tx, user_id, op.node_id)
@@ -764,17 +759,43 @@ impl Store {
         device_id: i64,
         ops: &[ysync_core::protocol::Op],
     ) -> Result<Vec<OpResult>, String> {
-        let mut conn = self.db.lock().unwrap();
-        let tx = conn.transaction().map_err(to_serr)?;
+        let results = {
+            let mut conn = self.db.lock().unwrap();
+            let tx = conn.transaction().map_err(to_serr)?;
+        // 配额状态批次级计算（B3）：一次 SUM，put 之间用内存 delta 累计
+        let quota_state: Option<(i64, i64)> = if ops.iter().any(|o| o.op == "put") {
+            let quota: i64 = tx
+                .query_row("SELECT quota_bytes FROM users WHERE id=?1", [user_id], |r| r.get(0))
+                .map_err(to_serr)?;
+            if quota > 0 {
+                let used: i64 = tx
+                    .query_row(
+                        "SELECT COALESCE(SUM(size),0) FROM nodes WHERE user_id=?1 AND type='file'",
+                        [user_id],
+                        |r| r.get(0),
+                    )
+                    .map_err(to_serr)?;
+                Some((quota, used))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let mut delta: i64 = 0;
         let mut results = Vec::with_capacity(ops.len());
         for op in ops {
-            let r = match Self::apply_op(&tx, self, user_id, device_id, op) {
+            let r = match Self::apply_op(&tx, self, user_id, device_id, op, quota_state.as_ref(), &mut delta) {
                 Ok((node_id, cursor)) => OpResult { ok: true, node_id, cursor, ..Default::default() },
                 Err(e) => OpResult { ok: false, error: e, ..Default::default() },
             };
             results.push(r);
         }
-        tx.commit().map_err(to_serr)?;
+            tx.commit().map_err(to_serr)?;
+            results
+        };
+        // 事务与锁释放后再做机会式日志裁剪（避免同线程重复加锁死锁）
+        let _ = self.trim_journal();
         Ok(results)
     }
 
@@ -813,13 +834,84 @@ impl Store {
         .map_err(to_serr)
     }
 
+    /// 日志水位（A1）：低于此 cursor 的变更已被裁剪，客户端需全量重同步。
+    pub fn journal_watermark(&self) -> i64 {
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key='journal_watermark'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
+    /// 机会式裁剪（A1）：保留最近 keep 条；触发条件 max-last_check ≥ trim_min。
+    /// YSYNC_JOURNAL_KEEP / YSYNC_JOURNAL_TRIM_MIN 环境变量可覆盖（测试用）。
+    fn trim_journal(&self) -> Result<(), String> {
+        let keep: i64 = std::env::var("YSYNC_JOURNAL_KEEP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(100_000);
+        let trim_min: i64 = std::env::var("YSYNC_JOURNAL_TRIM_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5_000);
+        let conn = self.db.lock().unwrap();
+        let max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(cursor),0) FROM changes", [], |r| r.get(0))
+            .unwrap_or(0);
+        let last: i64 = conn
+            .query_row(
+                "SELECT COALESCE(CAST(value AS INTEGER),0) FROM meta WHERE key='last_trim_check'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if max - last < trim_min {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('last_trim_check',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [max.to_string()],
+        )
+        .map_err(to_serr)?;
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM changes", [], |r| r.get(0))
+            .map_err(to_serr)?;
+        if count <= keep {
+            return Ok(());
+        }
+        let watermark: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MIN(cursor),0) FROM
+                 (SELECT cursor FROM changes ORDER BY cursor DESC LIMIT ?1)",
+                [keep],
+                |r| r.get(0),
+            )
+            .map_err(to_serr)?;
+        if watermark <= 0 {
+            return Ok(());
+        }
+        conn.execute("DELETE FROM changes WHERE cursor < ?1", [watermark])
+            .map_err(to_serr)?;
+        conn.execute(
+            "INSERT INTO meta(key,value) VALUES('journal_watermark',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [watermark.to_string()],
+        )
+        .map_err(to_serr)?;
+        Ok(())
+    }
+
     pub fn changes(
         &self,
         user_id: i64,
         since: i64,
         limit: i64,
         root_id: i64,
-    ) -> Result<(Vec<Change>, i64), String> {
+    ) -> Result<(Vec<Change>, i64, i64), String> {
         let conn = self.db.lock().unwrap();
         let root_path: String = if root_id > 0 {
             Self::node_by_id(&conn, user_id, root_id).map_err(|_| ERR_NOT_FOUND.to_string())?.path
@@ -871,7 +963,14 @@ impl Store {
                 |r| r.get(0),
             )
             .map_err(to_serr)?;
-        Ok((changes, head))
+        let watermark: i64 = conn
+            .query_row(
+                "SELECT COALESCE(CAST(value AS INTEGER), 0) FROM meta WHERE key='journal_watermark'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        Ok((changes, head, watermark))
     }
 
     pub fn ensure_blob_row(&self, hash: &str, size: i64) -> Result<(), String> {
@@ -964,7 +1063,7 @@ impl Store {
     pub fn list_trash(&self, user_id: i64) -> Result<Vec<TrashItem>, String> {
         if self.trash_retention_days > 0 {
             let cutoff = now_secs() - self.trash_retention_days * 86400;
-            self.purge_trash_before(user_id, cutoff)?;
+            self.purge_trash_before(user_id, cutoff)?; // 先清理（自加锁），再持 conn 读
         }
         let conn = self.db.lock().unwrap();
         let mut stmt = conn
@@ -1279,6 +1378,18 @@ impl Store {
                 .map_err(to_serr)?;
             drop(conn);
             self.blobs.remove(h);
+        }
+        // A5：清理 upload tmp 孤儿（会话丢失/上传中断残留，>24h 删除）
+        let tmp_dir = self.blobs.root.join("tmp");
+        if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+            let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+            for e in entries.filter_map(|e| e.ok()) {
+                if let Ok(meta) = e.metadata() {
+                    if meta.modified().map(|m| m < cutoff).unwrap_or(false) {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
         }
         Ok((purged, hashes.len() as i64))
     }

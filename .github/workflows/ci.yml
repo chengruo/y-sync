@@ -61,6 +61,33 @@ jobs:
       - name: Test
         run: cargo test -p ysync-core -p ysyncd -p ysync-server-rs
 
+  # 端到端验证（C1）：Go/Rust 双端构建后跑主 e2e + 特性验证 + 混沌
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建 Go 双端
+        run: |
+          go build -o bin/y-sync-server ./cmd/y-sync-server
+          go build -o bin/ysync ./cmd/ysync
+      - name: 构建 Rust 双端
+        run: |
+          cargo build --release -p ysyncd -p ysync-server-rs
+          cp target/release/ysyncd bin/ysyncd-rs
+          cp target/release/ysync-server-rs bin/y-sync-server-rs
+      - name: 主 e2e（Rust 全实现）
+        run: SERVER_BIN=bin/y-sync-server-rs BIN_A=bin/ysyncd-rs BIN_B=bin/ysyncd-rs bash scripts/e2e.sh
+      - name: 特性验证
+        run: bash scripts/e2e-features.sh
+      - name: 混沌长跑（6 轮）
+        run: bash scripts/chaos.sh 6
+
   rust-desktop:
     runs-on: macos-latest
     steps:

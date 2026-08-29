@@ -46,6 +46,17 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
         }
     }
     let authed = qtoken == token || bearer == token;
+    if path == "/setup-status" {
+        return respond(
+            request,
+            200,
+            &serde_json::to_string(&serde_json::json!({
+                "initialized": daemon.is_initialized()
+            }))
+            .unwrap(),
+            "application/json",
+        );
+    }
     if path == "/healthz" {
         return respond(request, 200, "{\"status\":\"ok\"}", "application/json");
     }
@@ -155,6 +166,22 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
                 Err(e) => respond(request, 400, &e, "text/plain"),
             }
         }
+        (Method::Post, "/setup") => {
+            let v: serde_json::Value =
+                serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            let server_url = v.get("server_url").and_then(|x| x.as_str()).unwrap_or("");
+            let user = v.get("user").and_then(|x| x.as_str()).unwrap_or("");
+            let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
+            let device_name = v.get("device_name").and_then(|x| x.as_str()).unwrap_or("");
+            match daemon.setup(server_url, user, password, device_name) {
+                Ok(()) => {
+                    let d = daemon.clone();
+                    std::thread::spawn(move || d.sync_all());
+                    respond(request, 200, "{\"ok\":true,\"initialized\":true}", "application/json")
+                }
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
         (Method::Post, "/remove") => {
             let name = json_field_str("name");
             match daemon.remove_folder(&name) {
@@ -215,6 +242,14 @@ const GO_PAGE: &str = r##"<!doctype html>
 </style></head><body>
 <h1>y-sync 管理台</h1><div id="msg"></div>
 
+<h2 id="setup-title" style="display:none">初始配置</h2>
+<div class="card" id="setup-card" style="display:none">
+ <div><label>服务端地址</label><input type="text" id="s-url" placeholder="https://ai-account.site/y-sync" style="width:60%"></div>
+ <div style="margin-top:6px"><label>用户名</label><input type="text" id="s-user" style="width:30%">
+ <label>密码</label><input type="password" id="s-pass" style="width:30%"></div>
+ <div style="margin-top:8px"><button onclick="doSetup()">连接并保存</button></div>
+</div>
+
 <h2>同步文件夹</h2>
 <table><thead><tr><th>名称</th><th>本地路径</th><th>文件</th><th>游标</th><th>最近同步</th><th>状态</th><th>操作</th></tr></thead>
 <tbody id="rows"></tbody></table>
@@ -239,7 +274,26 @@ const GO_PAGE: &str = r##"<!doctype html>
 const TOKEN = __TOKEN__;
 const api = (p) => p + (p.includes("?") ? "&" : "?") + "token=" + TOKEN;
 
+async function doSetup() {
+  const body = {
+    server_url: document.getElementById("s-url").value.trim(),
+    user: document.getElementById("s-user").value.trim(),
+    password: document.getElementById("s-pass").value
+  };
+  if (!body.server_url || !body.user) { msg("请填写服务端地址与用户名"); return; }
+  const r = await fetch(api("/setup"), {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  if (!r.ok) { msg("配置失败: " + await r.text()); return; }
+  msg("配置成功，开始同步");
+  refresh();
+}
 async function refresh() {
+  try {
+    const st = await (await fetch(api("/setup-status"))).json();
+    const initd = st.initialized;
+    document.getElementById("setup-title").style.display = initd ? "none" : "block";
+    document.getElementById("setup-card").style.display = initd ? "none" : "block";
+    document.getElementById("conflicts").parentElement.querySelectorAll("h2")[1].style.display = initd ? "" : "none";
+  } catch (e) {}
   try {
     const s = await (await fetch(api("/status"))).json();
     const rows = document.getElementById("rows");

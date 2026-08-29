@@ -150,21 +150,39 @@ pub fn serve(addr: &str, state: Arc<ServerState>) -> Result<(), String> {
     Ok(())
 }
 
-fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
+pub enum ReadErr {
+    Closed,
+    TooLarge,
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for ReadErr {
+    fn from(e: std::io::Error) -> Self {
+        ReadErr::Io(e)
+    }
+}
+
+fn read_request(stream: &mut TcpStream) -> Result<Request, ReadErr> {
     let mut buf: Vec<u8> = Vec::with_capacity(4096);
     let mut byte = [0u8; 1];
     // 读到 \r\n\r\n（简单起见逐字节，头部长度有限）
     loop {
-        stream.read_exact(&mut byte)?;
+        stream.read_exact(&mut byte).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                ReadErr::Closed
+            } else {
+                ReadErr::Io(e)
+            }
+        })?;
         buf.push(byte[0]);
         if buf.ends_with(b"\r\n\r\n") {
             break;
         }
         if buf.len() > 256 * 1024 {
-            return Err(std::io::Error::new(
+            return Err(ReadErr::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "headers too large",
-            ));
+            )));
         }
     }
     let head = String::from_utf8_lossy(&buf).to_string();
@@ -182,6 +200,10 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
             headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
+    let (path, query) = match target.split_once('?') {
+        Some((p, q)) => (p.to_string(), parse_query(q)),
+        None => (target.clone(), Vec::new()),
+    };
     let chunked = headers
         .iter()
         .any(|(k, v)| {
@@ -192,16 +214,27 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
         .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
         .and_then(|(_, v)| v.parse().ok())
         .unwrap_or(0);
+    // 请求体上限（A4）：内容/分块上传 512MB，ops 64MB，其余 2MB
+    let cap: usize = if path == "/api/v1/content" || path.starts_with("/api/v1/uploads/") {
+        512 << 20
+    } else if path == "/api/v1/ops" {
+        64 << 20
+    } else {
+        2 << 20
+    };
     let body = if chunked {
-        read_chunked(stream)?
+        let b = read_chunked(stream)?;
+        if b.len() > cap {
+            return Err(ReadErr::TooLarge);
+        }
+        b
     } else if content_length > 0 {
+        if content_length > cap {
+            return Err(ReadErr::TooLarge);
+        }
         read_exact_n(stream, content_length)?
     } else {
         Vec::new()
-    };
-    let (path, query) = match target.split_once('?') {
-        Some((p, q)) => (p.to_string(), parse_query(q)),
-        None => (target, Vec::new()),
     };
     Ok(Request {
         method,
@@ -258,36 +291,104 @@ fn read_chunked(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
     Ok(body)
 }
 
-fn handle_conn(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
-    let req = read_request(&mut stream)?;
-
-    // WebSocket 升级（/api/v1/notify）
-    if req.path == "/api/v1/notify"
-        && req
-            .header("Upgrade")
-            .map(|v| v.eq_ignore_ascii_case("websocket"))
-            .unwrap_or(false)
-    {
-        return handle_ws(stream, state, &req);
-    }
-
-    let (status, ctype, body, extra) = route(state, &req);
-    state.http_stats.record(status);
+/// 按 Body 类型写出（File 流式，A2）。
+fn send(
+    stream: &mut TcpStream,
+    status: u16,
+    ctype: &str,
+    body: &Body,
+    extra: Vec<(&'static str, String)>,
+    keep: bool,
+) -> std::io::Result<()> {
+    let len = match body {
+        Body::Bytes(b) => b.len() as u64,
+        Body::File(_, l) => *l,
+    };
     let mut headers: Vec<(&str, String)> = extra;
-    headers.push(("Content-Type", ctype));
-    let reason = status_reason(status);
-    write_response(&mut stream, status, reason, &headers, &body)
+    headers.push(("Content-Type", ctype.to_string()));
+    crate::util::write_head(
+        stream,
+        status,
+        status_reason(status),
+        &headers,
+        len,
+        keep,
+    )?;
+    match body {
+        Body::Bytes(b) => stream.write_all(b)?,
+        Body::File(f, mut remaining) => {
+            let mut buf = [0u8; 64 * 1024];
+            let mut reader = f.take(remaining);
+            while remaining > 0 {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                stream.write_all(&buf[..n])?;
+                remaining -= n as u64;
+            }
+        }
+    }
+    stream.flush()
+}
+
+fn handle_conn(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()> {
+    // keep-alive（B1）：连接复用，省去每请求 TCP+TLS 握手；空闲 75s 由读超时回收
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(75)))?;
+    loop {
+        let req = match read_request(&mut stream) {
+            Ok(r) => r,
+            Err(ReadErr::Closed) => return Ok(()),
+            Err(ReadErr::TooLarge) => {
+                send(
+                    &mut stream,
+                    413,
+                    "text/plain",
+                    &Body::Bytes(b"request body too large".to_vec()),
+                    vec![],
+                    false,
+                )?;
+                return Ok(());
+            }
+            Err(ReadErr::Io(_)) => return Ok(()),
+        };
+
+        // WebSocket 升级（/api/v1/notify）——独占连接，不参与 keep-alive
+        if req.path == "/api/v1/notify"
+            && req
+                .header("Upgrade")
+                .map(|v| v.eq_ignore_ascii_case("websocket"))
+                .unwrap_or(false)
+        {
+            return handle_ws(stream, state, &req);
+        }
+
+        let close = req
+            .header("Connection")
+            .map(|v| v.eq_ignore_ascii_case("close"))
+            .unwrap_or(false);
+        let (status, ctype, body, extra) = route(state, &req);
+        state.http_stats.record(status);
+        let keep = !close;
+        let conn_header = if close { "close" } else { "keep-alive" };
+        let mut extra = extra;
+        extra.push(("Connection", conn_header.into()));
+        send(&mut stream, status, &ctype, &body, extra, keep)?;
+        if close {
+            return Ok(());
+        }
+    }
 }
 
 fn handle_ws(mut stream: TcpStream, state: &ServerState, req: &Request) -> std::io::Result<()> {
     let Some(token) = req.q("token") else {
-        return write_response(&mut stream, 401, status_reason(401), &[], b"unauthorized");
+        return send(&mut stream, 401, "application/json", &Body::Bytes(b"{\"error\":\"unauthorized\"}".to_vec()), vec![], false);
     };
     let Ok((uid, _)) = state.store.auth_token(&token) else {
-        return write_response(&mut stream, 401, status_reason(401), &[], b"unauthorized");
+        return send(&mut stream, 401, "application/json", &Body::Bytes(b"{\"error\":\"unauthorized\"}".to_vec()), vec![], false);
     };
     let Some(key) = req.header("Sec-WebSocket-Key") else {
-        return write_response(&mut stream, 400, status_reason(400), &[], b"bad request");
+        return send(&mut stream, 400, "application/json", &Body::Bytes(b"{\"error\":\"bad request\"}".to_vec()), vec![], false);
     };
     let accept = base64(&sha1(format!("{key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes()));
     let head = format!(
@@ -308,13 +409,23 @@ fn handle_ws(mut stream: TcpStream, state: &ServerState, req: &Request) -> std::
     Ok(())
 }
 
-type RouteResult = (u16, String, Vec<u8>, Vec<(&'static str, String)>);
+/// 响应体：Bytes 常规；File 流式（零拷贝落 socket，大文件不再整载内存，A2）。
+pub enum Body {
+    Bytes(Vec<u8>),
+    File(std::fs::File, u64),
+}
+
+type RouteResult = (u16, String, Body, Vec<(&'static str, String)>);
+
+fn bytes_body(v: Vec<u8>) -> Body {
+    Body::Bytes(v)
+}
 
 fn ok_json(v: impl serde::Serialize) -> RouteResult {
     (
         200,
         "application/json".into(),
-        serde_json::to_vec(&v).unwrap_or_default(),
+        bytes_body(serde_json::to_vec(&v).unwrap_or_default()),
         vec![],
     )
 }
@@ -323,7 +434,9 @@ fn err_json(status: u16, msg: &str) -> RouteResult {
     (
         status,
         "application/json".into(),
-        serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default(),
+        bytes_body(
+            serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default(),
+        ),
         vec![],
     )
 }
@@ -363,7 +476,7 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 "ysync_http_requests_status{{code=\"{code}\"}} {n}\n"
             ));
         }
-        return (200, "text/plain; version=0.0.4".into(), out.into_bytes(), vec![]);
+        return (200, "text/plain; version=0.0.4".into(), Body::Bytes(out.into_bytes()), vec![]);
     }
     if m == "GET" && p == "/healthz" {
         const VERSION: &str = match option_env!("Y_SYNC_VERSION") {
@@ -393,10 +506,9 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
             return (
                 429,
                 "application/json".into(),
-                serde_json::to_vec(
+                Body::Bytes(serde_json::to_vec(
                     &serde_json::json!({"error": format!("尝试过于频繁，请 {retry_after} 秒后重试")}),
-                )
-                .unwrap_or_default(),
+                ).unwrap_or_default()),
                 h,
             );
         }
@@ -435,7 +547,9 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
             }
             ("GET", "/api/v1/sync/head") => {
                 return match state.store.head_cursor(uid) {
-                    Ok(c) => ok_json(serde_json::json!({ "cursor": c })),
+                    Ok(c) => ok_json(serde_json::json!({
+                        "cursor": c, "watermark": state.store.journal_watermark()
+                    })),
                     Err(e) => err_json(500, &e),
                 };
             }
@@ -444,8 +558,10 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 let root: i64 = req.q("root").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let limit: i64 = req.q("limit").and_then(|v| v.parse().ok()).unwrap_or(1000);
                 return match state.store.changes(uid, since, limit, root) {
-                    Ok((changes, head)) => ok_json(
-                        serde_json::json!({ "cursor": head, "changes": changes }),
+                    Ok((changes, head, watermark)) => ok_json(
+                        serde_json::json!({
+                            "cursor": head, "changes": changes, "watermark": watermark
+                        }),
                     ),
                     Err(e) => err_json(500, &e),
                 };
@@ -482,27 +598,31 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
             let size = file.metadata().map(|m| m.len()).unwrap_or(0);
             let mut headers: Vec<(&'static str, String)> =
                 vec![("X-Content-SHA256", hash.to_string())];
-            // Range 支持（单区间）
+            // Range 支持（单区间）；File+偏移流式，避免大文件整载内存（A2）
             if let Some(range) = req.header("Range") {
                 if let Some((start, end)) = parse_range(&range, size as i64) {
                     let end = end.min(size as i64 - 1);
                     let len = (end - start + 1).max(0) as u64;
                     use std::io::Seek;
                     let _ = file.seek(std::io::SeekFrom::Start(start as u64));
-                    let mut buf = vec![0u8; len as usize];
-                    let _ = file.read_exact(&mut buf);
-                    headers.push(("Content-Range", format!("bytes {start}-{end}/{}", size)));
+                    headers.push((
+                        "Content-Range",
+                        format!("bytes {start}-{end}/{}", size),
+                    ));
                     return (
                         206,
                         "application/octet-stream".into(),
-                        buf,
+                        Body::File(file, len),
                         headers,
                     );
                 }
             }
-            let mut buf = Vec::with_capacity(size as usize);
-            let _ = file.read_to_end(&mut buf);
-            return (200, "application/octet-stream".into(), buf, headers);
+            return (
+                200,
+                "application/octet-stream".into(),
+                Body::File(file, size),
+                headers,
+            );
         }
 
         if m == "POST" && p == "/api/v1/ops" {
@@ -581,7 +701,10 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 .parse()
                 .unwrap_or(-1);
             return match state.store.restore_trash(uid, id) {
-                Ok(n) => ok_json(n),
+                Ok(n) => {
+                    audit(state, &uid.to_string(), device_id, "trash_restore", &n.path);
+                    ok_json(n)
+                }
                 Err(e) if e == crate::store::ERR_NOT_FOUND => err_json(404, "trash item not found"),
                 Err(e) => err_json(500, &e),
             };
@@ -589,7 +712,10 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
         if m == "DELETE" && p.starts_with("/api/v1/trash/") {
             let id: i64 = p.trim_start_matches("/api/v1/trash/").parse().unwrap_or(-1);
             return match state.store.delete_trash(uid, id) {
-                Ok(()) => ok_json(serde_json::json!({ "ok": true })),
+                Ok(()) => {
+                    audit(state, &uid.to_string(), device_id, "trash_delete", &id.to_string());
+                    ok_json(serde_json::json!({ "ok": true }))
+                }
                 Err(_) => err_json(404, "trash item not found"),
             };
         }
@@ -614,13 +740,17 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
             let Ok(hash) = state.store.version_content(uid, id) else {
                 return err_json(404, "version not found");
             };
-            let mut file = match state.store.blobs.open(&hash) {
+            let file = match state.store.blobs.open(&hash) {
                 Ok(f) => f,
                 Err(_) => return err_json(404, "content not found"),
             };
-            let mut buf = Vec::new();
-            let _ = file.read_to_end(&mut buf);
-            return (200, "application/octet-stream".into(), buf, vec![]);
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            return (
+                200,
+                "application/octet-stream".into(),
+                Body::File(file, len),
+                vec![],
+            );
         }
 
         // ---------- 分块上传（FR-S11） ----------
@@ -674,7 +804,7 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 return err_json(500, &e);
             }
             s.received.insert(chunk_no);
-            return (204, "text/plain".into(), Vec::new(), vec![]);
+            return (204, "text/plain".into(), Body::Bytes(Vec::new()), vec![]);
         }
         if m == "POST" && p.starts_with("/api/v1/uploads/") && p.ends_with("/complete") {
             let id = p
@@ -760,7 +890,10 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 return err_json(400, "bad request");
             };
             return match state.store.create_share(uid, &sr.path, sr.hours, &sr.password) {
-                Ok(info) => ok_json(info),
+                Ok(info) => {
+                    audit(state, &uid.to_string(), device_id, "share_create", &sr.path);
+                    ok_json(info)
+                }
                 Err(e) => err_json(400, &e),
             };
         }
@@ -773,7 +906,10 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
         if m == "DELETE" && p.starts_with("/api/v1/shares/") {
             let token = p.trim_start_matches("/api/v1/shares/");
             return match state.store.delete_share(uid, token) {
-                Ok(()) => ok_json(serde_json::json!({ "ok": true })),
+                Ok(()) => {
+                    audit(state, &uid.to_string(), device_id, "share_delete", token);
+                    ok_json(serde_json::json!({ "ok": true }))
+                }
                 Err(_) => err_json(404, "share not found"),
             };
         }
@@ -830,26 +966,26 @@ fn handle_public_share(state: &ServerState, req: &Request, p: &str) -> RouteResu
         None => (rest.to_string(), String::new()),
     };
     let Ok((user_id, node_id, pwd_hash, _)) = state.store.get_share(&token) else {
-        return (404, "text/html".into(), "链接不存在或已过期".as_bytes().to_vec(), vec![]);
+        return (404, "text/html".into(), Body::Bytes("链接不存在或已过期".as_bytes().to_vec()), vec![]);
     };
     if !pwd_hash.is_empty() {
         let pwd = req.q("p").unwrap_or_default();
         if sha256_hex(format!("ysync-share:{pwd}").as_bytes()) != pwd_hash {
-            return (401, "text/html".into(), "需要密码（?p=）".as_bytes().to_vec(), vec![]);
+            return (401, "text/html".into(), Body::Bytes("需要密码（?p=）".as_bytes().to_vec()), vec![]);
         }
     }
     let Ok(root) = node_by_id(state, user_id, node_id) else {
-        return (404, "text/html".into(), "内容不存在".as_bytes().to_vec(), vec![]);
+        return (404, "text/html".into(), Body::Bytes("内容不存在".as_bytes().to_vec()), vec![]);
     };
     if !rel.is_empty() {
         if root.kind != "dir" {
-            return (404, "text/html".into(), "not found".as_bytes().to_vec(), vec![]);
+            return (404, "text/html".into(), Body::Bytes("not found".as_bytes().to_vec()), vec![]);
         }
         if rel.contains("..") {
-            return (400, "text/html".into(), "bad path".as_bytes().to_vec(), vec![]);
+            return (400, "text/html".into(), Body::Bytes("bad path".as_bytes().to_vec()), vec![]);
         }
         let Ok(n) = store_node_by_path(state, user_id, &format!("{}/{}", root.path, rel)) else {
-            return (404, "text/html".into(), "not found".as_bytes().to_vec(), vec![]);
+            return (404, "text/html".into(), Body::Bytes("not found".as_bytes().to_vec()), vec![]);
         };
         return serve_file_or_list(state, user_id, req, &token, n, &rel);
     }
@@ -874,7 +1010,7 @@ fn serve_file_or_list(
             } else {
                 format!("{rel}/?p={pwd}")
             };
-            return (301, "text/html".into(), Vec::new(), vec![("Location", loc)]);
+            return (301, "text/html".into(), Body::Bytes(Vec::new()), vec![("Location", loc)]);
         }
         let nodes = state.store.nodes(user_id).unwrap_or_default();
         let prefix = if n.path.is_empty() {
@@ -915,23 +1051,26 @@ fn serve_file_or_list(
             html.push_str(&format!(r#"<li><a href="{href}">{label}</a></li>"#));
         }
         html.push_str("</ul>");
-        return (200, "text/html; charset=utf-8".into(), html.into_bytes(), vec![]);
+        return (200, "text/html; charset=utf-8".into(), Body::Bytes(html.into_bytes()), vec![]);
     }
-    let mut file = match state.store.blobs.open(&n.content_hash) {
+    let file = match state.store.blobs.open(&n.content_hash) {
         Ok(f) => f,
-        Err(_) => return (404, "text/html".into(), "content missing".as_bytes().to_vec(), vec![]),
+        Err(_) => return (404, "text/html".into(), Body::Bytes("content missing".as_bytes().to_vec()), vec![]),
     };
-    let mut buf = Vec::new();
-    let _ = file.read_to_end(&mut buf);
-    let mut headers: Vec<(&'static str, String)> = Vec::new();
-    headers.push((
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let headers: Vec<(&'static str, String)> = vec![(
         "Content-Disposition",
         format!(
             "attachment; filename*=UTF-8''{}",
             urlencoding::encode(&n.name)
         ),
-    ));
-    (200, "application/octet-stream".into(), buf, headers)
+    )];
+    (
+        200,
+        "application/octet-stream".into(),
+        Body::File(file, len),
+        headers,
+    )
 }
 
 fn node_by_id(state: &ServerState, user_id: i64, id: i64) -> Result<NodeInfo, String> {
@@ -952,10 +1091,10 @@ fn store_node_by_path(state: &ServerState, user_id: i64, path: &str) -> Result<N
 
 fn handle_browse(state: &ServerState, req: &Request) -> RouteResult {
     let Some(token) = req.q("token") else {
-        return (401, "text/html".into(), "需要 token".as_bytes().to_vec(), vec![]);
+        return (401, "text/html".into(), Body::Bytes("需要 token".as_bytes().to_vec()), vec![]);
     };
     let Ok((uid, _)) = state.store.auth_token(&token) else {
-        return (401, "text/html".into(), "unauthorized".as_bytes().to_vec(), vec![]);
+        return (401, "text/html".into(), Body::Bytes("unauthorized".as_bytes().to_vec()), vec![]);
     };
     let path = req.q("path").unwrap_or_default();
     let path = path.trim_matches('/').to_string();
@@ -1006,7 +1145,7 @@ fn handle_browse(state: &ServerState, req: &Request) -> RouteResult {
         }
     }
     html.push_str("</ul>");
-    (200, "text/html; charset=utf-8".into(), html.into_bytes(), vec![])
+    (200, "text/html; charset=utf-8".into(), Body::Bytes(html.into_bytes()), vec![])
 }
 
 // ---------- 只读 WebDAV（M4 最小实现：OPTIONS/PROPFIND/GET + Basic Auth） ----------
@@ -1016,22 +1155,22 @@ fn handle_dav(state: &ServerState, req: &Request) -> RouteResult {
         return (
             401,
             "text/plain".into(),
-            "unauthorized".as_bytes().to_vec(),
+            Body::Bytes("unauthorized".as_bytes().to_vec()),
             vec![("WWW-Authenticate", "Basic realm=\"y-sync\"".to_string())],
         );
     };
     let Some(b64) = auth.strip_prefix("Basic ") else {
-        return (401, "text/plain".into(), "unauthorized".as_bytes().to_vec(), vec![]);
+        return (401, "text/plain".into(), Body::Bytes("unauthorized".as_bytes().to_vec()), vec![]);
     };
     let decoded = base64_decode(b64);
     let Some((user, pass)) = String::from_utf8(decoded).ok().and_then(|s| s.split_once(':').map(|(a, b)| (a.to_string(), b.to_string()))) else {
-        return (401, "text/plain".into(), "unauthorized".as_bytes().to_vec(), vec![]);
+        return (401, "text/plain".into(), Body::Bytes("unauthorized".as_bytes().to_vec()), vec![]);
     };
     let Ok(uid) = state.store.authenticate(&user, &pass) else {
         return (
             401,
             "text/plain".into(),
-            "unauthorized".as_bytes().to_vec(),
+            Body::Bytes("unauthorized".as_bytes().to_vec()),
             vec![("WWW-Authenticate", "Basic realm=\"y-sync\"".to_string())],
         );
     };
@@ -1071,27 +1210,26 @@ fn handle_dav(state: &ServerState, req: &Request) -> RouteResult {
         "OPTIONS" => (
             200,
             "text/plain".into(),
-            Vec::new(),
+            Body::Bytes(Vec::new()),
             vec![("DAV", "1".to_string()), ("Allow", "OPTIONS, GET, PROPFIND".to_string())],
         ),
         "GET" => {
             let Some(n) = find_node(&dav_path) else {
-                return (404, "text/plain".into(), "not found".as_bytes().to_vec(), vec![]);
+                return (404, "text/plain".into(), Body::Bytes("not found".as_bytes().to_vec()), vec![]);
             };
             if n.kind == "dir" {
-                return (200, "text/plain".into(), Vec::new(), vec![]);
+                return (200, "text/plain".into(), Body::Bytes(Vec::new()), vec![]);
             }
-            let mut file = match state.store.blobs.open(&n.content_hash) {
+            let file = match state.store.blobs.open(&n.content_hash) {
                 Ok(f) => f,
-                Err(_) => return (404, "text/plain".into(), "missing".as_bytes().to_vec(), vec![]),
+                Err(_) => return (404, "text/plain".into(), Body::Bytes("missing".as_bytes().to_vec()), vec![]),
             };
-            let mut buf = Vec::new();
-            let _ = file.read_to_end(&mut buf);
-            (200, "application/octet-stream".into(), buf, vec![])
+            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+            (200, "application/octet-stream".into(), Body::File(file, len), vec![])
         }
         "PROPFIND" => {
             let Some(n) = find_node(&dav_path) else {
-                return (404, "text/plain".into(), "not found".as_bytes().to_vec(), vec![]);
+                return (404, "text/plain".into(), Body::Bytes("not found".as_bytes().to_vec()), vec![]);
             };
             let depth = req.header("Depth").unwrap_or_else(|| "0".into());
             let href_base = format!("/dav/{}", dav_path);
@@ -1139,11 +1277,11 @@ fn handle_dav(state: &ServerState, req: &Request) -> RouteResult {
             (
                 207,
                 "application/xml; charset=utf-8".into(),
-                xml.into_bytes(),
+                Body::Bytes(xml.into_bytes()),
                 vec![],
             )
         }
-        _ => (405, "text/plain".into(), "method not allowed".as_bytes().to_vec(), vec![]),
+        _ => (405, "text/plain".into(), Body::Bytes("method not allowed".as_bytes().to_vec()), vec![]),
     }
 }
 

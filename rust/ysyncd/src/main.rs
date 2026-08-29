@@ -292,8 +292,20 @@ fn cmd_daemon(log: impl Fn(String) + Send + Sync + 'static, args: &[String]) -> 
     let reconcile =
         parse_duration(&flag_value(&flags, "reconcile").unwrap_or_else(|| "5m".into()));
 
-    let mut cfg = ysync_core::load_config()?;
-    cfg.defaults();
+    // setup 模式（UI 配置访问）：config.json 缺失时以空配置启动，
+    // 用户经浏览器管理台完成服务器/账号配置后进入正常同步
+    let (cfg, setup_mode) = match ysync_core::load_config() {
+        Ok(mut c) => {
+            c.defaults();
+            (c, false)
+        }
+        Err(_) => {
+            eprintln!("level=INFO msg=\"未初始化：进入 setup 模式（请在管理台完成配置）\"");
+            let mut c = ysync_core::Config::default();
+            c.device_name = ysync_core::default_device_name();
+            (c, true)
+        }
+    };
     ctx::install(cfg.clone(), cfg.device_id);
 
     let engine = make_engine(&cfg);
@@ -321,6 +333,11 @@ fn cmd_daemon(log: impl Fn(String) + Send + Sync + 'static, args: &[String]) -> 
         http_addr: http_addr.clone(),
         token,
         stop_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        setup_mode,
+        setup_done: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        watched: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+        watcher_slot: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        watch_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
     d.run(interval, reconcile);
     Ok(())

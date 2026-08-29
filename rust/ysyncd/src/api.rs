@@ -8,7 +8,10 @@ use ysync_core::{Error, Result};
 pub struct Api {
     pub base: String,
     pub token: String,
+    /// 元数据请求：短超时（C5），避免挂起请求阻塞整轮同步
     http: reqwest::blocking::Client,
+    /// 内容传输：长超时
+    http_long: reqwest::blocking::Client,
     upload_limiter: Option<std::sync::Arc<RateLimiter>>,
     download_limiter: Option<std::sync::Arc<RateLimiter>>,
 }
@@ -94,9 +97,13 @@ impl Api {
             base,
             token: token.to_string(),
             http: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(30 * 60))
+                .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
+            http_long: reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(30 * 60))
+                .build()
+                .expect("reqwest long client"),
             upload_limiter: None,
             download_limiter: None,
         }
@@ -109,8 +116,17 @@ impl Api {
     }
 
     fn req(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> reqwest::blocking::RequestBuilder {
+        self.req_on(&self.http, method, path, body)
+    }
+
+    /// 长超时请求（内容传输类，C5）。
+    fn req_long(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> reqwest::blocking::RequestBuilder {
+        self.req_on(&self.http_long, method, path, body)
+    }
+
+    fn req_on(&self, client: &reqwest::blocking::Client, method: &str, path: &str, body: Option<Vec<u8>>) -> reqwest::blocking::RequestBuilder {
         let url = format!("{}{}", self.base, path);
-        let mut rb = self.http.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), &url);
+        let mut rb = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), &url);
         rb = rb.header("Authorization", format!("Bearer {}", self.token));
         if let Some(b) = body {
             rb = rb.body(b);
@@ -147,9 +163,9 @@ impl Api {
         Ok(check(resp)?.json::<R>()?.nodes)
     }
 
-    pub fn head(&self) -> Result<i64> {
+    pub fn head(&self) -> Result<HeadResp> {
         let resp = self.req("GET", "/api/v1/sync/head", None).send()?;
-        Ok(check(resp)?.json::<HeadResp>()?.cursor)
+        check(resp)?.json::<HeadResp>().map_err(Error::from)
     }
 
     pub fn changes(&self, cursor: i64, limit: i64, root_id: i64) -> Result<ChangesResp> {
@@ -189,7 +205,7 @@ impl Api {
             limiter,
         };
         let resp = self
-            .http
+            .http_long
             .put(format!("{}/api/v1/content", self.base))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("X-Content-SHA256", &hash)
@@ -205,7 +221,7 @@ impl Api {
             std::fs::create_dir_all(dir)?;
         }
         let resp = self
-            .req(
+            .req_long(
                 "GET",
                 &format!("/api/v1/content/{}", urlencoding::encode(hash)),
                 None,
@@ -260,7 +276,7 @@ impl Api {
             "size": size, "sha256": sha256, "chunk_size": chunk
         }))?;
         let resp = self
-            .req("POST", "/api/v1/uploads", Some(body))
+            .req_long("POST", "/api/v1/uploads", Some(body))
             .header("Content-Type", "application/json")
             .send()?;
         check(resp)?.json().map_err(Error::from)
@@ -288,7 +304,7 @@ impl Api {
 
     pub fn upload_complete(&self, id: &str) -> Result<String> {
         let resp = self
-            .req("POST", &format!("/api/v1/uploads/{id}/complete"), None)
+            .req_long("POST", &format!("/api/v1/uploads/{id}/complete"), None)
             .send()?;
         let out: DedupResp = check(resp)?.json()?;
         Ok(out.hash)
@@ -391,7 +407,7 @@ impl Api {
             std::fs::create_dir_all(dir)?;
         }
         let resp = self
-            .req(
+            .req_long(
                 "GET",
                 &format!("/api/v1/versions/{version_id}/content"),
                 None,

@@ -168,20 +168,37 @@ pub fn html_escape(s: &str) -> String {
 }
 
 /// 把响应写回 socket。
+/// 写响应头；keep_alive=false 时自动补 Connection: close。
+pub fn write_head(
+    stream: &mut impl Write,
+    status: u16,
+    reason: &str,
+    headers: &[(&str, String)],
+    content_length: u64,
+    keep_alive: bool,
+) -> std::io::Result<()> {
+    let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str(&format!("Content-Length: {content_length}\r\n"));
+    if !keep_alive {
+        head.push_str("Connection: close\r\n");
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.flush()
+}
+
 pub fn write_response(
     stream: &mut impl Write,
     status: u16,
     reason: &str,
     headers: &[(&str, String)],
     body: &[u8],
+    keep_alive: bool,
 ) -> std::io::Result<()> {
-    let mut head = format!("HTTP/1.1 {status} {reason}\r\n");
-    for (k, v) in headers {
-        head.push_str(&format!("{k}: {v}\r\n"));
-    }
-    head.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    head.push_str("Connection: close\r\n\r\n");
-    stream.write_all(head.as_bytes())?;
+    write_head(stream, status, reason, headers, body.len() as u64, keep_alive)?;
     stream.write_all(body)?;
     stream.flush()
 }

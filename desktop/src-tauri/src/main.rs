@@ -87,6 +87,9 @@ fn main() {
             None,
         ))
         .setup(|app| {
+            // 托盘应用：不占 Dock（macOS）——先于 handle 借用
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let handle = app.handle();
 
             let open_i = MenuItem::with_id(handle, "open", "打开管理台", true, None::<&str>)?;
@@ -145,14 +148,13 @@ fn main() {
                 .build(app)?;
             tray.set_visible(true)?;
 
-            // 托盘应用：不占 Dock（macOS）
-            #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-
-            // 状态轮询：更新托盘图标与状态文案（3s）
+            // 状态轮询：更新托盘图标与状态文案（3s）；C3：token 变化 → 管理台窗口重导航（401 自愈）
             let status_item = status_i.clone();
             let tray = tray.clone();
-            std::thread::spawn(move || loop {
+            let app_for_poll = handle.clone();
+            std::thread::spawn(move || {
+                let mut last_url: Option<String> = None;
+                loop {
                 let (icon_bytes, text): (&'static [u8], String) = match connect() {
                     None => (tray_assets::GRAY, "状态：daemon 未运行".into()),
                     Some(d) => match d.client.status() {
@@ -187,7 +189,20 @@ fn main() {
                     let _ = tray.set_icon(Some(img.to_owned()));
                 }
                 let _ = status_item.set_text(&text);
+                // daemon.json 中的 addr/token 变化（重启/重新配置）→ 已开窗口重导航
+                if let Some(d) = connect() {
+                    let url = format!("http://{}?token={}", d.addr, d.token);
+                    if last_url.as_deref() != Some(url.as_str()) {
+                        if let Some(w) = app_for_poll.get_webview_window("manager") {
+                            if let Ok(u) = url.parse::<tauri::Url>() {
+                                let _ = w.navigate(u);
+                            }
+                        }
+                        last_url = Some(url);
+                    }
+                }
                 std::thread::sleep(Duration::from_secs(3));
+            }
             });
             Ok(())
         })

@@ -40,15 +40,22 @@ impl Hub {
         }
     }
 
-    /// 推送文本帧（慢连接直接丢弃，与 Go 版一致）。
+    /// 推送文本帧（A3）：先克隆连接列表再放全局锁，写超时 2s，
+    /// 慢/断开连接不阻塞其他用户的推送（与 Go 版"丢弃"语义一致）。
     pub fn notify(&self, user_id: i64, msg: &str) {
-        let g = self.by_user.lock().unwrap();
-        if let Some(list) = g.get(&user_id) {
-            for c in list {
-                if let Ok(mut w) = c.write.lock() {
-                    let _ = w.write_all(&encode_text_frame(msg.as_bytes()));
-                    let _ = w.flush();
-                }
+        let targets: Vec<Arc<WsConn>> = {
+            let g = self.by_user.lock().unwrap();
+            match g.get(&user_id) {
+                Some(list) => list.clone(),
+                None => return,
+            }
+        };
+        let frame = encode_text_frame(msg.as_bytes());
+        for c in targets {
+            if let Ok(mut w) = c.write.try_lock() {
+                let _ = w.set_write_timeout(Some(std::time::Duration::from_secs(2)));
+                let _ = w.write_all(&frame);
+                let _ = w.flush();
             }
         }
     }

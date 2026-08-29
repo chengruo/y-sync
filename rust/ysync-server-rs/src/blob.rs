@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::util::{hex, valid_hash};
 
 pub struct BlobStore {
-    root: PathBuf, // 数据目录
+    pub(crate) root: PathBuf, // 数据目录
 }
 
 pub struct PutResult {

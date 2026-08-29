@@ -115,6 +115,9 @@ pub fn daemon_info_path() -> Result<PathBuf> {
 
 pub fn write_daemon_info(info: &DaemonInfo) -> Result<()> {
     let p = daemon_info_path()?;
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?; // setup 模式下配置目录可能尚不存在
+    }
     let b = serde_json::to_vec(info)?;
     std::fs::write(p, b)?;
     Ok(())

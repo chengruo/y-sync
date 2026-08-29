@@ -19,6 +19,13 @@ pub struct Daemon {
     pub http_addr: String,
     pub token: String,
     pub stop_tx: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    /// setup 模式（UI 配置访问）：config.json 尚未初始化时，
+    /// daemon 仅提供控制服务，用户经浏览器完成登录后再进入正常同步循环。
+    pub setup_mode: bool,
+    pub setup_done: Arc<std::sync::atomic::AtomicBool>,
+    pub watched: Arc<Mutex<std::collections::HashSet<String>>>,
+    pub watcher_slot: Arc<Mutex<Option<crate::watcher::Watcher>>>,
+    pub watch_tx: Arc<Mutex<Option<mpsc::Sender<String>>>>,
 }
 
 impl Daemon {
@@ -48,6 +55,42 @@ impl Daemon {
         ctx::maybe_reload();
         // 热重载后新文件夹需要进入状态快照（/status 可见性）
         self.state.init_folders(&ctx::snapshot().folders);
+        // 热重载后同步 engine 连接参数（A7：server_url/token 变更即时生效）
+        {
+            let mut a = self.engine.as_ref().api_lock();
+            ctx::with_cfg(|c| {
+                if a.base != c.server_url {
+                    a.base = c.server_url.clone();
+                }
+                if a.token != c.token {
+                    a.token = c.token.clone();
+                }
+            });
+        }
+        // 新增文件夹补挂 FS 监听（独立 watcher，事件并入同一防抖循环）
+        if let Some(tx) = self.watch_tx.lock().unwrap().clone() {
+            let folders = ctx::with_cfg(|c| c.folders.clone());
+            let mut watched = self.watched.lock().unwrap();
+            for f in &folders {
+                if watched.insert(f.local_path.clone()) {
+                    match crate::watcher::Watcher::new(tx.clone()) {
+                        Ok(mut w) => {
+                            if let Err(e) = w.add_recursive(std::path::Path::new(&f.local_path)) {
+                                self.log(format!(
+                                    "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
+                                    f.name
+                                ));
+                            }
+                            *self.watcher_slot.lock().unwrap() = Some(w);
+                        }
+                        Err(e) => self.log(format!(
+                            "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
+                            f.name
+                        )),
+                    }
+                }
+            }
+        }
         let folders = ctx::with_cfg(|c| {
             c.folders
                 .iter()
@@ -106,6 +149,81 @@ impl Daemon {
         if stats.conflicts > 0 {
             self.state.add_conflicts(&f.name, stats.conflicts);
         }
+    }
+
+    // ---------- setup 模式（UI 配置访问） ----------
+
+    /// 首次配置：校验凭据 → 落盘 → 切出 setup 模式。
+    pub fn setup(
+        &self,
+        server_url: &str,
+        user: &str,
+        password: &str,
+        device_name: &str,
+    ) -> Result<(), String> {
+        let resp = crate::api::Api::login(user, password, device_name, server_url)
+            .map_err(|e| format!("登录失败: {e}"))?;
+        let server_url = server_url.trim_end_matches('/').to_string();
+        let device_name = if device_name.is_empty() {
+            ysync_core::default_device_name()
+        } else {
+            device_name.to_string()
+        };
+        ctx::with_cfg(|c| {
+            *c = ysync_core::Config {
+                server_url,
+                user: user.to_string(),
+                token: resp.token.clone(),
+                device_name: device_name.clone(),
+                device_id: resp.device_id,
+                ..Default::default()
+            };
+            c.defaults(); // 防 chunk_size=0 除零（P1 修复）
+        });
+        if let Err(e) = ctx::save_result() {
+            return Err(format!("{e:?}"));
+        }
+        self.setup_done
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.state.init_folders(&ctx::snapshot().folders);
+        self.log(format!(
+            "level=INFO msg=\"setup 完成\" user={user:?} device={:?}",
+            device_name
+        ));
+        Ok(())
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        !self.setup_mode || self.setup_done.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 创建 watcher 并挂载当前全部文件夹（run 启动 / setup 完成后调用）。
+    fn attach_watcher_now(&self) {
+        if let Some(tx) = self.watch_tx.lock().unwrap().clone() {
+            self.attach_watcher(&tx);
+        }
+    }
+
+    fn attach_watcher(&self, tx: &mpsc::Sender<String>) {
+        let mut slot = self.watcher_slot.lock().unwrap();
+        let mut w = match crate::watcher::Watcher::new(tx.clone()) {
+            Ok(w) => w,
+            Err(e) => {
+                self.log(format!("level=WARN msg=\"watcher 创建失败\" err={e:?}"));
+                return;
+            }
+        };
+        let folders = ctx::with_cfg(|c| c.folders.clone());
+        for f in &folders {
+            if let Err(e) = w.add_recursive(std::path::Path::new(&f.local_path)) {
+                self.log(format!(
+                    "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
+                    f.name
+                ));
+            }
+        }
+        *slot = Some(w);
+        self.log("level=INFO msg=\"FS 事件监听已启用\"".into());
     }
 
     // ---------- 管理操作 ----------
@@ -269,20 +387,12 @@ impl Daemon {
             });
         }
 
-        // FS 事件监听（递归 + 防抖）
+        // FS 事件监听（递归 + 防抖）；setup 模式在配置完成后自动补建
         let (tx, rx) = mpsc::channel::<String>();
-        let folders = ctx::with_cfg(|c| c.folders.clone());
-        for f in &folders {
-            if let Err(e) =
-                crate::watcher::Watcher::add_recursive(std::path::Path::new(&f.local_path), &tx)
-            {
-                self.log(format!(
-                    "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
-                    f.name
-                ));
-            }
+        *self.watch_tx.lock().unwrap() = Some(tx.clone());
+        if !self.setup_mode {
+            self.attach_watcher(&tx);
         }
-        self.log("level=INFO msg=\"FS 事件监听已启用\"".into());
         {
             let me = self.clone();
             std::thread::spawn(move || {
@@ -292,17 +402,24 @@ impl Daemon {
             });
         }
 
-        // WebSocket 订阅（准实时；断线退化为轮询）
+        // WebSocket 订阅（准实时；断线退化为轮询；重连时读取最新 base/token——A7）
         {
             let me = self.clone();
             let api = self.engine.api.clone();
-            std::thread::spawn(move || {
-                let (base, token) = {
-                    let a = api.lock().unwrap();
-                    (a.base.clone(), a.token.clone())
-                };
-                ws_loop(&base, &token, move || me.sync_all());
-            });
+            std::thread::spawn(move || ws_loop(&api, move || me.sync_all()));
+        }
+
+        // setup 模式：等待用户经管理台完成首次配置，再拉起同步循环
+        if self.setup_mode {
+            self.log("level=INFO msg=\"setup 模式：请在管理台完成服务器与账号配置\"".into());
+            while !self
+                .setup_done
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            self.log("level=INFO msg=\"配置完成，进入正常同步循环\"".into());
+            self.attach_watcher_now();
         }
 
         // 立即先同步一轮（与 Go daemon 首轮行为对齐）
@@ -365,16 +482,19 @@ fn files_tracked(local: &str) -> i64 {
 }
 
 /// WS 订阅循环（tokio-tungstenite；断线重连指数退避封顶 30s）。
-fn ws_loop(base: &str, token: &str, on_notify: impl Fn() + Send + 'static) {
+fn ws_loop(api: &Arc<Mutex<crate::api::Api>>, on_notify: impl Fn() + Send + 'static) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     rt.block_on(async move {
         let mut backoff = 1u64;
-        let ws_base = base.replacen("http", "ws", 1);
-        let url = format!("{ws_base}/api/v1/notify?token={token}");
         loop {
+            let url = {
+                let a = api.lock().unwrap_or_else(|p| p.into_inner());
+                let ws_base = a.base.replacen("http", "ws", 1);
+                format!("{ws_base}/api/v1/notify?token={}", a.token)
+            };
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((mut ws, _)) => {
                     backoff = 1;

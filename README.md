@@ -95,6 +95,33 @@ open http://127.0.0.1:8730/               # 状态页（冲突/错误可见、�
 环境变量：`YSYNC_DATA`（服务端数据目录）、`YSYNC_CONFIG_DIR`（客户端配置目录，
 默认 `~/.config/y-sync/`（macOS: `~/Library/Application Support/y-sync/`））。
 
+## 多客户端 × 多文件夹如何互相同步
+
+一台机器（客户端）可同时接入 N 个文件夹（`ysync add`，FR-S13）；一个文件夹可被
+M 台机器同时同步。机制：
+
+```
+                ┌── 客户端 A（devMain）                    ┌── 客户端 B（devB）
+ ~/code/api  ───┤ folder "api"    cursor=120              ─┤ folder "api"    cursor=118
+ ~/notes     ───┤ folder "notes"  cursor=95   ── 服务端 ── ─┤ folder "notes"  cursor=120
+                └──────────── y-sync-server ──────────────┘
+                      （每用户一棵节点树 + 全局变更日志）
+```
+
+- **服务端是唯一事实源**：每用户一棵节点树（node 稳定 ID，路径只是属性）+
+  一张全局变更日志（changes 表）。任何一个客户端的写入都会追加日志条目
+  （带 device_id 归属）。
+- **每文件夹独立游标**：客户端为每个文件夹记录自己的日志游标，互不干扰——
+  notes 的同步进度不会影响 api。
+- **增量拉取**：客户端凭 `cursor` 调 `GET /sync/changes?cursor=&root=<子树根>`
+  只取该子树、该游标之后的变更，应用到本地（移动语义/冲突副本/水位全量重同步）。
+- **上行两阶段**：先 `PUT /content`（SHA-256 去重），再 `POST /ops` 原子提交
+  元数据；跳过 `device_id` 等于自己的日志条目（避免伪冲突）。
+- **触发源**：FS 事件（2s 防抖）+ WebSocket 推送（服务端只发"有新 cursor"）
+  + 兜底轮询；同一文件夹并发同步被 flock + 进程内标记互斥。
+- **收敛保证**：日志按设备水位裁剪（watermark 下发）；客户端游标落后于水位时
+  自动清空状态全量重同步；kill -9 任意端后重同步收敛（压测/混沌脚本覆盖）。
+
 ## 架构
 
 ### Rust 实现（与 Go 协议等价，e2e 差分验证）
@@ -154,6 +181,9 @@ bash scripts/e2e-features.sh # 特性验证（14 项）：设备管理/吊销、
 bash scripts/chaos.sh 8      # 混沌长跑：随机文件操作 + 随机 kill -9（客户端/服务端），
                              # 终态全树逐字节一致性校验（限速上传窗口内击杀）
 ```
+
+协议细节见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（含省略即零值/null 容忍/chunked
+等跨语言契约；协议 v1 已冻结，双实现共用）。
 
 e2e 提供 `wait_for` 轮询助手消除时序脆弱性；`E2E_KEEP=1` 保留现场目录供排查。
 

@@ -260,8 +260,13 @@ pub struct FolderCfg {
 }
 
 impl Engine {
+    /// 毒锁容错访问（某次 panic 后锁数据仍可用）。
+    pub fn api_lock(&self) -> std::sync::MutexGuard<'_, Api> {
+        self.api.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn with_api<T>(&self, f: impl FnOnce(&mut Api) -> Result<T, ysync_core::Error>) -> Result<T, ysync_core::Error> {
-        let mut api = self.api.lock().unwrap();
+        let mut api = self.api_lock();
         f(&mut api)
     }
 
@@ -357,6 +362,19 @@ impl Engine {
             f.cursor = 0;
         }
 
+        // 日志水位检查（A1）：游标低于服务端裁剪水位 → 基线不可信，全量重同步
+        if f.cursor > 0 {
+            let head = self.with_api(|a| a.head())?;
+            if head.watermark > 0 && f.cursor < head.watermark {
+                eprintln!(
+                    "level=WARN msg=\"游标低于日志水位，全量重同步\" folder={:?} cursor={} watermark={}",
+                    f.name, f.cursor, head.watermark
+                );
+                crate::state::reset_state_db(&root);
+                f.cursor = 0;
+            }
+        }
+
         let st = State::open(&root)?;
         let excludes = f.excludes.clone();
         let excluded_fn = move |rel: &str| -> bool {
@@ -397,7 +415,7 @@ impl Engine {
                 changed_set.insert(rel.clone());
                 server_now.insert(rel, n);
             }
-            new_cursor = self.with_api(|a| a.head())?;
+            new_cursor = self.with_api(|a| a.head())?.cursor;
         } else {
             for (rel, r) in &baseline {
                 server_now.insert(
@@ -1044,14 +1062,11 @@ impl Engine {
             }
         }
 
-        // 11. 持久化状态与新 cursor（FR-S14）
-        for rel in &state_del {
-            st.delete(rel)?;
-        }
-        for (rel, r) in &state_set {
-            st.set(rel, r)?;
-        }
-        st.set_cursor(new_cursor)?;
+        // 11. 持久化状态与新 cursor（FR-S14；B2：单事务，大文件夹免逐行 fsync）
+        let dels: Vec<String> = state_del.iter().cloned().collect();
+        let sets: Vec<(String, Rec)> =
+            state_set.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        st.persist(&dels, &sets, new_cursor)?;
         f.cursor = new_cursor;
         self.persist_folder(f)?;
         crate::state::clear_pending_marker(&root);

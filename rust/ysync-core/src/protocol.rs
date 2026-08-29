@@ -82,12 +82,18 @@ pub struct ChangesResp {
     pub cursor: i64,
     #[serde(rename = "changes", default)]
     pub changes: Vec<Change>,
+    #[serde(rename = "watermark", default)]
+    pub watermark: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct HeadResp {
     #[serde(rename = "cursor", default)]
     pub cursor: i64,
+    /// 日志水位（A1）：低于此 cursor 的变更已被服务端裁剪，客户端须全量重同步。
+    /// 旧版服务端不下发（0=未知，跳过检查）。
+    #[serde(rename = "watermark", default)]
+    pub watermark: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

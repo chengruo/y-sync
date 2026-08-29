@@ -114,6 +114,42 @@ impl State {
         Ok(())
     }
 
+    /// 单事务批量持久化（B2）：删除 + 覆写 + 游标原子提交。
+    pub fn persist(
+        &self,
+        deletes: &[String],
+        sets: &[(String, Rec)],
+        cursor: i64,
+    ) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| ysync_core::Error::Msg(format!("state tx: {e}")))?;
+        for p in deletes {
+            tx.execute("DELETE FROM files WHERE path = ?1", [p])
+                .map_err(to_err)?;
+        }
+        for (p, r) in sets {
+            tx.execute(
+                "INSERT INTO files(path, node_id, content_hash, size, mtime, type)
+                 VALUES(?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(path) DO UPDATE SET node_id=excluded.node_id,
+                   content_hash=excluded.content_hash, size=excluded.size,
+                   mtime=excluded.mtime, type=excluded.type",
+                rusqlite::params![p, r.node_id, r.hash, r.size, r.mtime, r.kind],
+            )
+            .map_err(to_err)?;
+        }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES('cursor', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [cursor.to_string()],
+        )
+        .map_err(to_err)?;
+        tx.commit().map_err(|e| ysync_core::Error::Msg(format!("state commit: {e}")))?;
+        Ok(())
+    }
+
     pub fn cursor(&self) -> Result<i64> {
         let mut stmt = self
             .conn
