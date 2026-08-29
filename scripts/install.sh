@@ -24,7 +24,6 @@ TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
 echo "    最新版本: $TAG"
 
 fetch() { # fetch <asset名> <输出路径>
-  if [ -f "$2" ]; then echo "    已存在，跳过: $2"; return 0; fi
   echo "    下载 $1"
   curl -fsSL "https://github.com/$REPO/releases/download/$TAG/$1" -o "$2"
 }
@@ -33,7 +32,8 @@ install_one() { # install_one <asset名> <目标名>
   TMP="$(mktemp)"
   fetch "$1" "$TMP"
   chmod +x "$TMP"
-  if [ "$(id -u)" = "0" ]; then
+  mkdir_bin
+  if [ -w "$PREFIX/bin" ]; then
     mv "$TMP" "$PREFIX/bin/$2"
   else
     echo "    需要 sudo 写入 $PREFIX/bin"
@@ -42,21 +42,22 @@ install_one() { # install_one <asset名> <目标名>
   echo "    已安装: $PREFIX/bin/$2"
 }
 
-SUDO=""
-[ "$(id -u)" = "0" ] || SUDO="sudo"
+mkdir_bin() {
+  mkdir -p "$PREFIX/bin" 2>/dev/null || sudo mkdir -p "$PREFIX/bin"
+}
 
 case "$MODE" in
   client|both)
-    [ "$OS" = "Linux" ] && ASSET="ysyncd-rs-linux-$A"
-    [ "$OS" = "Darwin" ] && ASSET="ysyncd-rs-darwin-$A"
+    [ "$OS" = "Linux" ] && ASSET="ysyncd-linux-$A"
+    [ "$OS" = "Darwin" ] && ASSET="ysyncd-darwin-$A"
     [ -n "${ASSET:-}" ] || { echo "客户端暂不支持 $OS（可用桌面安装包或源码构建）"; }
-    [ -n "${ASSET:-}" ] && { $SUDO mkdir -p "$PREFIX/bin"; install_one "$ASSET" "ysync"; }
+    [ -n "${ASSET:-}" ] && { install_one "$ASSET" "ysync"; }
     ;;
 esac
 case "$MODE" in
   server|both)
     [ "$OS" = "Linux" ] || { echo "服务端仅支持 Linux（跳过 server）"; }
-    [ "$OS" = "Linux" ] && { $SUDO mkdir -p "$PREFIX/bin"; install_one "ysync-server-rs-linux-$A" "y-sync-server-rs"; }
+    [ "$OS" = "Linux" ] && { install_one "ysync-server-rs-linux-$A" "y-sync-server-rs"; }
     ;;
 esac
 
