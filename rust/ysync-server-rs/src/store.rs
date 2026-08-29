@@ -135,6 +135,18 @@ pub struct ShareInfo {
 
 pub const ERR_NOT_FOUND: &str = "not found";
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Counts {
+    pub users: i64,
+    pub devices: i64,
+    pub files: i64,
+    pub dirs: i64,
+    pub blobs: i64,
+    pub blob_bytes: i64,
+    pub shares: i64,
+    pub trash: i64,
+}
+
 fn to_serr(e: rusqlite::Error) -> String {
     format!("db: {e}")
 }
@@ -181,6 +193,21 @@ impl Store {
                expires_at INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);",
         )
         .map_err(to_serr)?;
+        // 幂等迁移：quota_bytes（P1-8）
+        let has_quota: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='quota_bytes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        if has_quota == 0 {
+            conn.execute(
+                "ALTER TABLE users ADD COLUMN quota_bytes INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(to_serr)?;
+        }
         Ok(Store {
             db: Mutex::new(conn),
             blobs: BlobStore::new(data_dir),
@@ -191,7 +218,7 @@ impl Store {
 
     // ---------- 用户与设备 ----------
 
-    pub fn create_user(&self, name: &str, password: &str) -> Result<i64, String> {
+    pub fn create_user(&self, name: &str, password: &str, quota_bytes: i64) -> Result<i64, String> {
         if name.is_empty() || password.is_empty() || name.contains([' ', '\t', '/']) {
             return Err("invalid user name".into());
         }
@@ -204,11 +231,30 @@ impl Store {
         );
         let conn = self.db.lock().unwrap();
         conn.execute(
-            "INSERT INTO users(name, pass_hash, created) VALUES(?1,?2,?3)",
-            rusqlite::params![name, hash, now_secs()],
+            "INSERT INTO users(name, pass_hash, created, quota_bytes) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![name, hash, now_secs(), quota_bytes],
         )
         .map_err(to_serr)?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// list-users + 用量/配额（管理用）。
+    pub fn list_users_with_usage(&self) -> Vec<serde_json::Value> {
+        let conn = self.db.lock().unwrap();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT u.name, u.quota_bytes, COALESCE(SUM(CASE WHEN n.type='file' THEN n.size ELSE 0 END),0)
+             FROM users u LEFT JOIN nodes n ON n.user_id = u.id GROUP BY u.id ORDER BY u.id",
+        ) else { return Vec::new() };
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(serde_json::json!({
+                    "name": r.get::<_, String>(0)?,
+                    "quota_bytes": r.get::<_, i64>(1)?,
+                    "used_bytes": r.get::<_, i64>(2)?,
+                }))
+            })
+            .unwrap_or_else(|_| panic!());
+        rows.filter_map(|r| r.ok()).collect()
     }
 
     pub fn authenticate(&self, name: &str, password: &str) -> Result<i64, String> {
@@ -554,6 +600,43 @@ impl Store {
                     )
                     .map_err(|_| "content not uploaded yet".to_string())?;
                 let size = if op.size == 0 { bsize } else { op.size };
+                // 配额强制（P1-8）：quota_bytes=0 表示不限；按增量计算（新建/覆盖）
+                let quota: i64 = tx
+                    .query_row("SELECT quota_bytes FROM users WHERE id=?1", [user_id], |r| r.get(0))
+                    .map_err(to_serr)?;
+                if quota > 0 {
+                    let used: i64 = tx
+                        .query_row(
+                            "SELECT COALESCE(SUM(size),0) FROM nodes WHERE user_id=?1 AND type='file'",
+                            [user_id],
+                            |r| r.get(0),
+                        )
+                        .map_err(to_serr)?;
+                    let replaced: i64 = if op.node_id > 0 {
+                        tx.query_row(
+                            "SELECT COALESCE(size,0) FROM nodes WHERE id=?1 AND type='file'",
+                            [op.node_id],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(0)
+                    } else {
+                        let p_full = {
+                            let pp = Self::node_path(tx, user_id, op.parent_id)?;
+                            Self::join_path(&pp, &op.name)
+                        };
+                        tx.query_row(
+                            "SELECT COALESCE(size,0) FROM nodes WHERE user_id=?1 AND path=?2 AND type='file'",
+                            rusqlite::params![user_id, p_full],
+                            |r| r.get(0),
+                        )
+                        .unwrap_or(0)
+                    };
+                    if used - replaced + size > quota {
+                        return Err(format!(
+                            "quota exceeded: used {used}B, incoming {size}B, quota {quota}B"
+                        ));
+                    }
+                }
                 if op.node_id > 0 {
                     let n = Self::node_by_id(tx, user_id, op.node_id)
                         .map_err(|_| "node not found".to_string())?;
@@ -803,6 +886,77 @@ impl Store {
         )
         .map_err(to_serr)?;
         Ok(())
+    }
+
+    /// /metrics 用计数（P1-7）。
+    pub fn counts(&self) -> Result<Counts, String> {
+        let conn = self.db.lock().unwrap();
+        let q = |sql: &str| -> i64 {
+            conn.query_row(sql, [], |r| r.get(0)).unwrap_or(0)
+        };
+        Ok(Counts {
+            users: q("SELECT COUNT(*) FROM users"),
+            devices: q("SELECT COUNT(*) FROM devices"),
+            files: q("SELECT COUNT(*) FROM nodes WHERE type='file'"),
+            dirs: q("SELECT COUNT(*) FROM nodes WHERE type='dir'"),
+            blobs: q("SELECT COUNT(*) FROM blobs"),
+            blob_bytes: q("SELECT COALESCE(SUM(size),0) FROM blobs"),
+            shares: q("SELECT COUNT(*) FROM shares"),
+            trash: q("SELECT COUNT(*) FROM trash"),
+        })
+    }
+
+    // ---------- 设备管理（P1-6） ----------
+
+    pub fn list_devices(&self, user_id: i64) -> Result<Vec<serde_json::Value>, String> {
+        let conn = self.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, name, last_seen FROM devices WHERE user_id=?1 ORDER BY id",
+            )
+            .map_err(to_serr)?;
+        let rows = stmt
+            .query_map([user_id], |r| {
+                Ok(serde_json::json!({
+                    "id": r.get::<_, i64>(0)?,
+                    "name": r.get::<_, String>(1)?,
+                    "last_seen": r.get::<_, i64>(2)?,
+                }))
+            })
+            .map_err(to_serr)?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// 吊销单台设备（P1-6）：删除 token；不属于该用户则 404。
+    pub fn revoke_device(&self, user_id: i64, device_id: i64) -> Result<(), String> {
+        let conn = self.db.lock().unwrap();
+        let n = conn
+            .execute(
+                "DELETE FROM devices WHERE id=?1 AND user_id=?2",
+                rusqlite::params![device_id, user_id],
+            )
+            .map_err(to_serr)?;
+        if n == 0 {
+            return Err(ERR_NOT_FOUND.into());
+        }
+        Ok(())
+    }
+
+    /// 用户已用字节数（文件节点 size 汇总；配额强制与 list-users 用量用）。
+    pub fn used_bytes(&self, user_id: i64) -> Result<i64, String> {
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COALESCE(SUM(size),0) FROM nodes WHERE user_id=?1 AND type='file'",
+            [user_id],
+            |r| r.get(0),
+        )
+        .map_err(to_serr)
+    }
+
+    pub fn user_quota(&self, user_id: i64) -> Result<i64, String> {
+        let conn = self.db.lock().unwrap();
+        conn.query_row("SELECT quota_bytes FROM users WHERE id=?1", [user_id], |r| r.get(0))
+            .map_err(to_serr)
     }
 
     // ---------- 回收站（FR-V2） ----------

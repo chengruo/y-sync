@@ -33,6 +33,8 @@ fn main() {
         "share" => cmd_share(&args[1..]),
         "shares" => cmd_shares(),
         "unshare" => cmd_unshare(&args[1..]),
+        "devices" => cmd_devices(),
+        "revoke" => cmd_revoke(&args[1..]),
         "remove" => cmd_remove(&args[1..]),
         "ui" => cmd_ui(),
         "version" => {
@@ -63,7 +65,8 @@ fn usage() -> ! {
   ysyncd trash   list | restore <id> | rm <id>    回收站（FR-V2）
   ysyncd versions list|restore <folder> <path>    文件版本（FR-V1）
   ysyncd share   <folder> <path> [-hours N] [-password pw]
-  ysyncd shares / ysyncd unshare <token>
+  ysyncd shares / ysyncd unshare <token>        分享管理
+  ysyncd devices / ysyncd revoke <id>          设备管理（吊销丢失设备）
   ysyncd remove  <name>                          解除跟踪文件夹
   ysyncd ui                                      打开本地管理台
   ysyncd version
@@ -534,6 +537,42 @@ fn cmd_unshare(args: &[String]) -> Result<()> {
     let api = api::Api::new(&cfg.server_url, &cfg.token);
     api.delete_share(token)?;
     println!("已撤销分享");
+    Ok(())
+}
+
+fn cmd_devices() -> Result<()> {
+    let cfg = ysync_core::load_config()?;
+    let api = api::Api::new(&cfg.server_url, &cfg.token);
+    let devices = api.devices_list()?;
+    if devices.is_empty() {
+        println!("(无设备)");
+        return Ok(());
+    }
+    for d in &devices {
+        let id = d["id"].as_i64().unwrap_or(0);
+        let name = d["name"].as_str().unwrap_or("?");
+        let seen = d["last_seen"].as_i64().unwrap_or(0);
+        let cur = d["current"].as_bool().unwrap_or(false);
+        println!(
+            "  {:<6} {:<30} 最近活跃 {}{}",
+            id,
+            name,
+            fmt_unix(seen),
+            if cur { "  ← 当前设备" } else { "" }
+        );
+    }
+    Ok(())
+}
+
+fn cmd_revoke(args: &[String]) -> Result<()> {
+    let Some(id) = args.first() else {
+        return Err(ysync_core::Error::Msg("usage: ysyncd revoke <id>".into()));
+    };
+    let id: i64 = id.parse().map_err(|_| ysync_core::Error::Msg("id 需为数字".into()))?;
+    let cfg = ysync_core::load_config()?;
+    let api = api::Api::new(&cfg.server_url, &cfg.token);
+    api.device_revoke(id)?;
+    println!("设备 #{id} 已吊销（其 token 立即失效）");
     Ok(())
 }
 

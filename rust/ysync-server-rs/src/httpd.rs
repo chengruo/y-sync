@@ -14,6 +14,96 @@ pub struct ServerState {
     pub store: Store,
     pub uploads: UploadManager,
     pub hub: Hub,
+    pub login_guard: LoginGuard,
+    pub http_stats: HttpStats,
+    pub started_at: std::time::Instant,
+    pub audit_path: std::path::PathBuf,
+}
+
+/// 审计日志（P1-7）：JSONL 追加，16MB 轮转。
+pub fn audit(state: &ServerState, user: &str, device: i64, event: &str, detail: &str) {
+    use std::io::Write;
+    let path = &state.audit_path;
+    if path.metadata().map(|m| m.len()).unwrap_or(0) > 16 << 20 {
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
+    }
+    let line = serde_json::json!({
+        "ts": now_secs(), "user": user, "device": device,
+        "event": event, "detail": detail
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 登录暴力破解防护（P0-3）：按 (IP, 用户) 记失败次数，
+/// 连续 5 次失败后指数退避锁定（60s 起，上限 12h）；成功登录清零。内存态，重启即清。
+pub struct LoginGuard {
+    failures: std::sync::Mutex<std::collections::HashMap<(String, String), (u32, i64)>>,
+}
+
+const LOCKOUT_THRESHOLD: u32 = 5;
+
+impl LoginGuard {
+    pub fn new() -> Self {
+        LoginGuard {
+            failures: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    fn key(ip: &str, user: &str) -> (String, String) {
+        (ip.to_string(), user.to_string())
+    }
+
+    /// 返回 Err(重试秒数) 表示处于锁定窗口。
+    pub fn check(&self, ip: &str, user: &str) -> Result<(), i64> {
+        let now = now_secs();
+        let mut g = self.failures.lock().unwrap();
+        // 顺手清理过期条目，防膨胀
+        if g.len() > 10_000 {
+            g.retain(|_, (_, until)| *until > now);
+        }
+        if let Some((_, until)) = g.get(&Self::key(ip, user)) {
+            if *until > now {
+                return Err(until - now);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn record_failure(&self, ip: &str, user: &str) {
+        let now = now_secs();
+        let mut g = self.failures.lock().unwrap();
+        let e = g.entry(Self::key(ip, user)).or_insert((0u32, 0i64));
+        e.0 += 1;
+        if e.0 >= LOCKOUT_THRESHOLD {
+            let backoff = 60i64 * (1i64 << (e.0 - LOCKOUT_THRESHOLD).min(7)); // 上限 12h
+            e.1 = now + backoff;
+        }
+    }
+
+    pub fn record_success(&self, ip: &str, user: &str) {
+        self.failures.lock().unwrap().remove(&Self::key(ip, user));
+    }
+}
+
+/// HTTP 请求计数（/metrics 用）。
+pub struct HttpStats {
+    pub total: std::sync::Mutex<u64>,
+    pub by_status: std::sync::Mutex<std::collections::HashMap<u16, u64>>,
+}
+
+impl HttpStats {
+    pub fn new() -> Self {
+        HttpStats {
+            total: std::sync::Mutex::new(0),
+            by_status: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+    pub fn record(&self, status: u16) {
+        *self.total.lock().unwrap() += 1;
+        *self.by_status.lock().unwrap().entry(status).or_insert(0) += 1;
+    }
 }
 
 pub struct Request {
@@ -182,6 +272,7 @@ fn handle_conn(mut stream: TcpStream, state: &ServerState) -> std::io::Result<()
     }
 
     let (status, ctype, body, extra) = route(state, &req);
+    state.http_stats.record(status);
     let mut headers: Vec<(&str, String)> = extra;
     headers.push(("Content-Type", ctype));
     let reason = status_reason(status);
@@ -241,6 +332,39 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
     let m = req.method.as_str();
     let p = req.path.as_str();
 
+    if m == "GET" && p == "/metrics" {
+        // 服务端口仅绑定 loopback，/metrics 不经 nginx 暴露，故无需认证
+        let c = state.store.counts().unwrap_or_default();
+        let uptime = state.started_at.elapsed().as_secs();
+        let statuses = state.http_stats.by_status.lock().unwrap().clone();
+        let total = *state.http_stats.total.lock().unwrap();
+        let mut out = String::new();
+        out.push_str("# TYPE ysync_uptime_seconds gauge\n");
+        out.push_str(&format!("ysync_uptime_seconds {uptime}\n"));
+        for (name, val) in [
+            ("ysync_users", c.users),
+            ("ysync_devices", c.devices),
+            ("ysync_files", c.files),
+            ("ysync_dirs", c.dirs),
+            ("ysync_blobs", c.blobs),
+            ("ysync_blob_bytes", c.blob_bytes),
+            ("ysync_shares", c.shares),
+            ("ysync_trash_items", c.trash),
+        ] {
+            out.push_str(&format!("# TYPE {name} gauge\n{name} {val}\n"));
+        }
+        out.push_str("# TYPE ysync_http_requests_total counter\n");
+        out.push_str(&format!("ysync_http_requests_total {total}\n"));
+        for (code, n) in &statuses {
+            out.push_str(&format!(
+                "# TYPE ysync_http_requests_status{{code=\"{code}\"}} counter\n"
+            ));
+            out.push_str(&format!(
+                "ysync_http_requests_status{{code=\"{code}\"}} {n}\n"
+            ));
+        }
+        return (200, "text/plain; version=0.0.4".into(), out.into_bytes(), vec![]);
+    }
     if m == "GET" && p == "/healthz" {
         const VERSION: &str = match option_env!("Y_SYNC_VERSION") {
             Some(v) => v,
@@ -261,9 +385,28 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
         let Ok(lr) = serde_json::from_slice::<LoginReq>(&req.body) else {
             return err_json(400, "bad request");
         };
+        // 暴力破解防护：X-Real-IP（nginx 设置）+ 用户名 维度
+        let ip = req.header("X-Real-IP").unwrap_or_else(|| "unknown".into());
+        if let Err(retry_after) = state.login_guard.check(&ip, &lr.user) {
+            let mut h = vec![("Retry-After", retry_after.to_string())];
+            h.push(("Content-Type", "application/json".into()));
+            return (
+                429,
+                "application/json".into(),
+                serde_json::to_vec(
+                    &serde_json::json!({"error": format!("尝试过于频繁，请 {retry_after} 秒后重试")}),
+                )
+                .unwrap_or_default(),
+                h,
+            );
+        }
         let Ok(uid) = state.store.authenticate(&lr.user, &lr.password) else {
+            state.login_guard.record_failure(&ip, &lr.user);
+            audit(state, &lr.user, 0, "login_failed", &format!("ip={ip}"));
             return err_json(401, "invalid credentials");
         };
+        state.login_guard.record_success(&ip, &lr.user);
+        audit(state, &lr.user, 0, "login", &format!("ip={ip} device={}", lr.device_name));
         let name = if lr.device_name.is_empty() {
             "unnamed-device".to_string()
         } else {
@@ -368,6 +511,24 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
             };
             return match state.store.apply_ops(uid, device_id, &ops) {
                 Ok(results) => {
+                    for (op, r) in ops.iter().zip(results.iter()) {
+                        let detail = if op.content_hash.is_empty() {
+                            op.name.clone()
+                        } else {
+                            format!("{} {}", op.name, &op.content_hash[..8.min(op.content_hash.len())])
+                        };
+                        if r.ok {
+                            audit(state, &uid.to_string(), device_id, &format!("op_{}", op.op), &detail);
+                        } else {
+                            audit(
+                                state,
+                                &uid.to_string(),
+                                device_id,
+                                "op_failed",
+                                &format!("{} {} {}", op.op, detail, r.error),
+                            );
+                        }
+                    }
                     if !ops.is_empty() {
                         if let Ok(head) = state.store.head_cursor(uid) {
                             state.hub.notify(
@@ -385,6 +546,28 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
             };
         }
 
+        if m == "GET" && p == "/api/v1/devices" {
+            let Ok(mut list) = state.store.list_devices(uid) else {
+                return err_json(500, "query failed");
+            };
+            for v in &mut list {
+                if v["id"].as_i64() == Some(device_id) {
+                    v["current"] = serde_json::Value::Bool(true);
+                }
+            }
+            return ok_json(serde_json::json!({ "devices": list }));
+        }
+        if m == "DELETE" && p.starts_with("/api/v1/devices/") {
+            let id: i64 = p.trim_start_matches("/api/v1/devices/").parse().unwrap_or(-1);
+            return match state.store.revoke_device(uid, id) {
+                Ok(()) => {
+                    audit(state, &uid.to_string(), device_id, "device_revoked", &id.to_string());
+                    ok_json(serde_json::json!({ "ok": true }))
+                }
+                Err(e) if e == crate::store::ERR_NOT_FOUND => err_json(404, "device not found"),
+                Err(e) => err_json(500, &e),
+            };
+        }
         if m == "GET" && p == "/api/v1/trash" {
             return match state.store.list_trash(uid) {
                 Ok(items) => ok_json(serde_json::json!({ "items": items })),

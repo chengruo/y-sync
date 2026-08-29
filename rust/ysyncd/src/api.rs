@@ -25,9 +25,12 @@ impl RateLimiter {
             state: std::sync::Mutex::new((rate, rate, std::time::Instant::now())),
         }
     }
-    pub fn take(&self, mut n: i64) {
-        loop {
-            let need;
+    pub fn take(&self, n0: i64) {
+        // 分段发放：单次请求量可以大于 1 秒配额（如 1MB 分块 vs 256KB/s），
+        // 每轮最多等 1 秒并发放 min(剩余, 突发上限)，保证有限时间内完成。
+        let mut remaining = n0.max(1) as f64;
+        while remaining > 0.0 {
+            let wait;
             {
                 let mut st = self.state.lock().unwrap();
                 let now = std::time::Instant::now();
@@ -36,14 +39,20 @@ impl RateLimiter {
                     st.1 = st.0;
                 }
                 st.2 = now;
-                if st.1 >= n as f64 {
-                    st.1 -= n as f64;
-                    return;
+                if st.1 > 0.0 {
+                    let grant = remaining.min(st.1);
+                    st.1 -= grant;
+                    remaining -= grant;
                 }
-                need = ((n as f64 - st.1) / st.0).max(0.05);
+                wait = if remaining > 0.0 {
+                    (remaining.min(st.0) / st.0).max(0.01)
+                } else {
+                    0.0
+                };
             }
-            std::thread::sleep(std::time::Duration::from_secs_f64(need.min(1.0)));
-            n = n.max(1);
+            if wait > 0.0 {
+                std::thread::sleep(std::time::Duration::from_secs_f64(wait));
+            }
         }
     }
 }
@@ -425,6 +434,24 @@ impl Api {
         }
         let resp = self.req("GET", "/api/v1/shares", None).send()?;
         Ok(check(resp)?.json::<R>()?.shares)
+    }
+
+    pub fn devices_list(&self) -> Result<Vec<serde_json::Value>> {
+        #[derive(serde::Deserialize)]
+        struct R {
+            #[serde(rename = "devices", deserialize_with = "null_to_vec", default)]
+            devices: Vec<serde_json::Value>,
+        }
+        let resp = self.req("GET", "/api/v1/devices", None).send()?;
+        Ok(check(resp)?.json::<R>()?.devices)
+    }
+
+    pub fn device_revoke(&self, id: i64) -> Result<()> {
+        let resp = self
+            .req("DELETE", &format!("/api/v1/devices/{id}"), None)
+            .send()?;
+        check(resp)?;
+        Ok(())
     }
 
     pub fn delete_share(&self, token: &str) -> Result<()> {

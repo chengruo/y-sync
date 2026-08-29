@@ -1,5 +1,5 @@
-# 推送 tag（如 v0.2.0）自动构建多平台二进制并创建 GitHub Release。
-# 依赖 GITHUB_TOKEN（仓库默认自动提供，权限已在 permissions 中声明）。
+# 发布流水线：Go 冻结产物 + Rust 全平台产物 + Tauri 桌面包，统一挂到 GitHub Release。
+# 推送 v* tag 自动触发。
 
 name: Release
 
@@ -11,7 +11,8 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # ---------- Go 冻结产物（不再维护，保留至移除） ----------
+  release-go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +32,105 @@ jobs:
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
               -o "dist/y-sync-${GOOS}-${GOARCH}${EXT}" ./cmd/ysync
           done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-go
+          path: dist/
+
+  # ---------- Rust 服务端/客户端 ----------
+  release-rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  name: linux-amd64 }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, name: linux-arm64 }
+          - { os: macos-latest,   target: aarch64-apple-darwin,      name: darwin-arm64 }
+          - { os: macos-latest,   target: x86_64-apple-darwin,       name: darwin-amd64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,    name: windows-amd64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build server + client
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          mkdir -p dist
+          export Y_SYNC_VERSION="$V"
+          for pkg in ysync-server-rs ysyncd; do
+            cargo build --release -p "$pkg" --target "${{ matrix.target }}"
+            SRC="target/${{ matrix.target }}/release"
+            NAME="$pkg-${{ matrix.name }}"
+            [ -f "$SRC/$pkg" ] && cp "$SRC/$pkg" "dist/$NAME"
+            [ -f "$SRC/$pkg.exe" ] && cp "$SRC/$pkg.exe" "dist/$NAME.exe"
+          done
+          ls -la dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-rust-${{ matrix.name }}
+          path: dist/
+
+  # ---------- Tauri 桌面安装包（P0-2） ----------
+  release-desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,   name: macos }   # .dmg / .app
+          - { os: ubuntu-latest,  name: linux }   # .deb / .AppImage
+          - { os: windows-latest, name: windows } # .msi / .exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.name }}
+      - name: 安装 Linux 打包依赖
+        if: matrix.name == 'linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: Tauri build
+        shell: bash
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          npx -y @tauri-apps/cli@2 build
+          mkdir -p bundle-out
+          find src-tauri/target/release/bundle -type f \
+            \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.deb" -o -name "*.AppImage" \
+               -o -name "*.msi" -o -name "*-setup.exe" \) \
+            -exec cp {} bundle-out/ \;
+          ls -la bundle-out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-desktop-${{ matrix.name }}
+          path: bundle-out/
+
+  # ---------- 汇总发布 ----------
+  publish:
+    runs-on: ubuntu-latest
+    needs: [release-go, release-rust, release-desktop]
+    steps:
+      - uses: actions/checkout@v4
+      - name: 汇总产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: dist-*
+      - name: 收集
+        shell: bash
+        run: |
+          mkdir -p dist
+          find artifacts -type f -exec cp {} dist/ \;
+          ls -la dist/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -38,8 +138,13 @@ jobs:
           body: |
             轻量文件同步服务 y-sync 发布版本 ${{ github.ref_name }}。
 
-            - `y-sync-server-*`：服务端
-            - `y-sync-*`：客户端（ysync）
-            - 覆盖 linux / darwin / windows（amd64 / arm64）
+            **推荐使用 Rust 实现**（Go 实现已冻结）：
+            - `ysync-server-rs-*`：Rust 服务端
+            - `ysyncd-rs-*`：Rust 客户端（命令行）
+            - `y-sync_*` / `y-sync-*`：桌面安装包（Tauri：托盘 + 管理台）
+            - `y-sync-server-*` / `y-sync-*`（无 rs 后缀）：Go 冻结版（仅存量参考）
+
+            一键安装（Linux/macOS）：
+            `curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | bash`
           files: dist/*
           generate_release_notes: true

@@ -24,8 +24,16 @@ fn main() {
         "passwd" => cmd_passwd(&args[1..]),
         "list-users" => {
             let store = open_store();
-            for u in store.list_users() {
-                println!("{u}");
+            for u in store.list_users_with_usage() {
+                let name = u["name"].as_str().unwrap_or("?");
+                let quota = u["quota_bytes"].as_i64().unwrap_or(0);
+                let used = u["used_bytes"].as_i64().unwrap_or(0);
+                let quota_s = if quota > 0 {
+                    format!("{:.2} GB", quota as f64 / 1073741824.0)
+                } else {
+                    "不限".into()
+                };
+                println!("{name:<20} 已用 {:.2} GB  配额 {quota_s}", used as f64 / 1073741824.0);
             }
             Ok(())
         }
@@ -89,13 +97,28 @@ fn read_password() -> String {
 }
 
 fn cmd_adduser(args: &[String]) -> Result<(), String> {
-    let Some(name) = args.first() else {
-        return Err("usage: y-sync-server-rs adduser <name>".into());
+    let mut name: Option<String> = None;
+    let mut quota: i64 = 0; // 0 = 不限
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--quota" => {
+                i += 1;
+                let v = args.get(i).ok_or("--quota 需要参数（字节数，如 10737418240）")?;
+                quota = v.parse().map_err(|_| "--quota 需要字节数")?;
+            }
+            other if !other.starts_with('-') => name = Some(other.to_string()),
+            other => return Err(format!("未知参数 {other:?}")),
+        }
+        i += 1;
+    }
+    let Some(name) = name else {
+        return Err("usage: y-sync-server-rs adduser <name> [--quota 字节数]".into());
     };
     let store = open_store();
     let pw = read_password();
-    let id = store.create_user(name, &pw)?;
-    println!("user {name:?} created (id={id})");
+    let id = store.create_user(&name, &pw, quota)?;
+    println!("user {name:?} created (id={id}, quota={quota})");
     Ok(())
 }
 
@@ -134,6 +157,10 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         uploads: upload::UploadManager::new(data_dir().join("tmp")),
         hub: hub::Hub::new(),
         store,
+        login_guard: httpd::LoginGuard::new(),
+        http_stats: httpd::HttpStats::new(),
+        started_at: std::time::Instant::now(),
+        audit_path: data_dir().join("audit.log"),
     });
 
     // 优雅退出（SR6）：SIGTERM 直接退出（SQLite WAL 保证一致性）

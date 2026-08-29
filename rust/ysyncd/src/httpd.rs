@@ -223,6 +223,9 @@ const GO_PAGE: &str = r##"<!doctype html>
 <h2>待处理冲突 <span id="ccount" style="font-weight:normal;color:#57606a"></span></h2>
 <div id="conflicts"></div>
 
+<h2>设备 <span id="devcount" style="font-weight:normal;color:#57606a"></span></h2>
+<div id="devices"></div>
+
 <h2>接入新文件夹</h2>
 <div class="card">
  <div><label>本地路径</label><input type="text" id="f-path" placeholder="/Users/me/code/my-project" style="width:70%"></div>
@@ -270,6 +273,26 @@ async function refresh() {
         ' <button onclick=\'resolve("' + esc(it.folder) + '","' + esc(it.rel) + '","' + esc(it.copy_rel) + '","copy")\'>采用副本</button></div>');
     }
   } catch (e) {}
+  try {
+    const d = await (await fetch(api("/devices"))).json();
+    const box = document.getElementById("devices");
+    const list = d.devices || [];
+    document.getElementById("devcount").textContent = "(" + list.length + ")";
+    box.innerHTML = "";
+    for (const it of list) {
+      const cur = it.current ? ' <span style="color:#1a7f37">← 当前设备</span>' : "";
+      box.insertAdjacentHTML("beforeend",
+        '<div class="card"><b>' + esc(it.name) + "</b>" + cur +
+        ' <code>最近活跃 ' + new Date(it.last_seen * 1000).toLocaleString() + "</code>" +
+        ' <button class="danger" onclick=\'revoke("' + it.id + '")\'>吊销</button></div>');
+    }
+  } catch (e) {}
+}
+async function revoke(id) {
+  if (!confirm("吊销设备 #" + id + "？（其 token 立即失效）")) return;
+  const r = await fetch(api("/devices/" + id), {method: "DELETE"});
+  if (!r.ok) msg("失败: " + await r.text());
+  refresh();
 }
 function btn(path, folder, label) {
   return '<button onclick=\'op("' + path + '","' + esc(folder) + '")\'>' + label + "</button>";

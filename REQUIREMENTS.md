@@ -256,6 +256,11 @@ M1–M4 已全部实现并通过 53 项端到端断言（`scripts/e2e.sh`）+ �
    稳定性保障新增：跨进程同步互斥（.y-sync/sync.lock flock）、进程内 syncing 标记、
    mkdir 按深度分层批次、daemon 配置热重载（CLI add/remove 运行期生效）、
    压测脚本 scripts/e2e-stress.sh（真实 kill -9 / WS 重连 / Unicode 深路径 / 百文件并发）。
+   **P0/P1 交付（2026-08-29）**：Rust 产物进 Release 流水线（server/client 多平台 +
+   Tauri 桌面包 dmg/msi/deb）、一键安装脚本、登录防爆破（IP+用户指数锁定）、
+   设备管理（列表/单台吊销）、/metrics（Prometheus）+ 审计日志（JSONL 轮转）、
+   用户配额（增量强制）、混沌长跑测试 scripts/chaos.sh（随机操作+随机击杀，
+   终态逐字节一致性）。限速器修复：分段发放避免"单次请求量 > 速率"的活锁。
 2. M3 的"桌面托盘 GUI"以 daemon 本地控制 API + Web 状态页（127.0.0.1:8730）代替
    （§3.5 的"引擎常驻、GUI 是薄壳"架构不变；原生托盘壳留待 Tauri 评估）。
 3. 版本保留策略实现了"每文件最近 N 版"（时间梯度清理未做）。

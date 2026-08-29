@@ -149,6 +149,10 @@ bash scripts/e2e.sh    # 76 项端到端断言（同步/冲突/移动/回收站/
 bash scripts/e2e-stress.sh  # 稳定性压测（30 项）：真实 kill -9 客户端/服务端、
                             # WS 断线重连、Unicode/空格/深路径、100 文件并发
                             # （flock 互斥）、GC 后回收站恢复、配置热重载
+bash scripts/e2e-features.sh # 特性验证（14 项）：设备管理/吊销、/metrics、
+                             # 审计日志、登录防爆破锁定、用户配额
+bash scripts/chaos.sh 8      # 混沌长跑：随机文件操作 + 随机 kill -9（客户端/服务端），
+                             # 终态全树逐字节一致性校验（限速上传窗口内击杀）
 ```
 
 e2e 提供 `wait_for` 轮询助手消除时序脆弱性；`E2E_KEEP=1` 保留现场目录供排查。
@@ -183,6 +187,19 @@ CI 自动部署：在 GitHub 仓库配置 Secrets（`DEPLOY_HOST` / `DEPLOY_USER
 nginx 配置要点（模板已处理）：WebSocket 反代头（`/api/v1/notify`）、
 `client_max_body_size 0`（默认 1M 会 413 上传）、数据目录独立于部署（只换二进制）。
 每次部署前自动执行 `backup`（VACUUM INTO 快照 + blobs）。
+
+## 服务端管理与安全
+
+- **登录防爆破**：按 IP+用户名 记失败次数，连续 5 次失败后指数退避锁定（60s 起，上限 12h），
+  锁定期间即使密码正确也返回 429；成功登录清零。
+- **设备管理**：`ysync devices` 列出全部设备（标记当前），`ysync revoke <id>` 吊销
+  单台设备（token 立即失效）；管理台同步提供吊销按钮。
+- **用户配额**：服务端 `adduser <name> --quota <字节数>`（0=不限）；PUT 时按增量
+  强制校验，超限返回明确错误并进入重试；`list-users` 显示每用户用量/配额。
+- **可观测性**：`GET /metrics`（Prometheus 格式：用户/设备/文件/blob 字节/分享/回收站
+  计数、HTTP 请求计数、运行时长；仅 loopback 可达，未做认证）；审计日志
+  `audit.log`（JSONL：登录成功/失败、每个元数据操作，16MB 轮转）。
+- **一键安装**：`curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | sh`
 
 ## 已知限制
 
