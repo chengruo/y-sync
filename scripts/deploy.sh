@@ -57,7 +57,7 @@ ssh_script() { # 远程脚本：stdin 传入（quoted heredoc，远端变量不�
     cat
     echo "REMOTE_SCRIPT"
   else
-    ssh "${SSH_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "env $envs bash -s"
+    ssh "${BASE_SSH_OPTS[@]}" "${SSH_PORT_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "env $envs bash -s"
   fi
 }
 scp_to() {
