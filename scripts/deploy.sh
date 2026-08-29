@@ -125,7 +125,7 @@ ssh_script "VERSION=$DEPLOY_VERSION" <<'REMOTE'
 set -euo pipefail
 install -m 0755 /opt/y-sync/incoming/y-sync-server-rs.$VERSION \
   /opt/y-sync/releases/$VERSION/y-sync-server-rs
-chown y-sync:y-sync /opt/y-sync/releases/$VERSION/y-sync-server-rs
+sudo chown y-sync:y-sync /opt/y-sync/releases/$VERSION/y-sync-server-rs
 PREV=$(readlink -f /opt/y-sync/current || true)
 ln -sfn "releases/$VERSION" /opt/y-sync/current.new
 mv -T /opt/y-sync/current.new /opt/y-sync/current
