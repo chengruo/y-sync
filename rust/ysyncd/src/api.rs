@@ -1,5 +1,5 @@
 //! 协议 HTTP 客户端：与 Go internal/client/api.go 行为一致。
-use std::io::{Read, Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use ysync_core::protocol::*;
@@ -177,6 +177,112 @@ impl Api {
     }
 
     /// 节点树分页列举（P0-1）。返回 (nodes, has_more)。
+    /// 读取文件指定字节区间（补传缺块用）。
+    pub fn read_range(&self, path: &Path, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let mut f = std::fs::File::open(path)?;
+        use std::io::{Seek, SeekFrom};
+        f.seek(SeekFrom::Start(offset))?;
+        let mut buf = vec![0u8; len];
+        let mut n = 0;
+        while n < len {
+            let k = f.read(&mut buf[n..])?;
+            if k == 0 {
+                break;
+            }
+            n += k;
+        }
+        buf.truncate(n);
+        Ok(buf)
+    }
+
+    /// 上传单个内容 blob（块补传用）。
+    pub fn put_blob(&self, data: &[u8], want_hash: &str) -> Result<()> {
+        let resp = self
+            .req_long("PUT", "/api/v1/content", Some(data.to_vec()))
+            .header("X-Content-SHA256", want_hash)
+            .send()?;
+        check(resp)?;
+        Ok(())
+    }
+
+    /// CDC 切块 + 缺块补传 + 清单注册（P1-8）。
+    /// CDC 切块 + 缺块补传 + 清单注册（P1-8）。
+    /// CDC 切块 + 缺块补传 + 清单注册（P1-8）。
+    /// 服务端以【原文件哈希】为键；GET 下载时透明重组装，校验天然通过。
+    pub fn put_content_cdc(
+        &self,
+        path: &Path,
+        want_hash: &str,
+        size: i64,
+        cdc: &crate::chunk::CdcParams,
+    ) -> Result<String> {
+        use std::io::Seek;
+        let mut f = std::fs::File::open(path)?;
+        let chunks = crate::chunk::split_chunks(&mut f, cdc)?;
+        let hashes: Vec<String> = chunks.iter().map(|c| c.hash.clone()).collect();
+        let mut missing = self.upload_manifest(want_hash, size, &hashes)?;
+        let mut round = 0;
+        while !missing.is_empty() {
+            round += 1;
+            if round > 4 {
+                return Err(Error::Msg("CDC 缺块补传反复失败".into()));
+            }
+            for mh in &missing {
+                let (off, len) = chunks
+                    .iter()
+                    .find(|c| &c.hash == mh)
+                    .map(|c| (c.offset, c.len))
+                    .ok_or_else(|| Error::Msg("missing chunk not in manifest".into()))?;
+                f.seek(SeekFrom::Start(off))?;
+                let data = read_full_len(&mut f, len)?;
+                self.put_blob(&data[..], mh)?;
+            }
+            missing = self.upload_manifest(want_hash, size, &hashes)?;
+        }
+        Ok(want_hash.to_string())
+    }
+
+    /// CDC 清单注册：返回服务端缺失的块列表（空 = 注册成功）。
+    pub fn upload_manifest(
+        &self,
+        file_hash: &str,
+        size: i64,
+        chunks: &[String],
+    ) -> Result<Vec<String>> {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "size": size, "file_hash": file_hash, "chunks": chunks
+        }))?;
+        let resp = self
+            .req_long("POST", "/api/v1/manifests", Some(body))
+            .header("Content-Type", "application/json")
+            .send()?;
+        if resp.status() == reqwest::StatusCode::CONFLICT {
+            #[derive(serde::Deserialize)]
+            struct E {
+                #[serde(rename = "missing", default)]
+                missing: Vec<String>,
+            }
+            let e: E = resp.json().unwrap_or(E { missing: Vec::new() });
+            return Ok(e.missing);
+        }
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let t = resp.text().unwrap_or_default();
+            return Err(Error::Msg(format!("manifests: HTTP {status}: {t}")));
+        }
+        Ok(Vec::new())
+    }
+
+    pub fn get_manifest_content(
+        &self,
+        mhash: &str,
+        dest: &Path,
+        mtime_milli: i64,
+    ) -> Result<()> {
+        // 重组装流与普通内容同端点同校验逻辑
+        self.get_content(mhash, dest, mtime_milli)
+    }
+
     pub fn nodes_paged(&self, after_id: i64, limit: i64) -> Result<(Vec<NodeInfo>, bool)> {
         #[derive(serde::Deserialize)]
         struct R {
@@ -516,6 +622,20 @@ impl Api {
         check(resp)?;
         Ok(())
     }
+}
+
+fn read_full_len(f: &mut std::fs::File, len: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; len];
+    let mut n = 0;
+    while n < len {
+        let k = f.read(&mut buf[n..])?;
+        if k == 0 {
+            break;
+        }
+        n += k;
+    }
+    buf.truncate(n);
+    Ok(buf)
 }
 
 fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {

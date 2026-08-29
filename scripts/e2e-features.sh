@@ -246,6 +246,37 @@ check "引擎记录 put 失败待重试" 'grep -q "op_failed" "$SRV_DATA/audit.l
 check "list-users 显示配额与用量" \
   "YSYNC_DATA='$SRV_DATA' '$SERVER_BIN' list-users | grep -qE 'bob.*配额 0.00 GB|bob.*已用'"
 
+# ---------- CDC 增量上传（P1-8，小分块配置）----------
+# 配额场景把 cfg 换成了 bob——CDC 场景前切回 alice
+$YS init -server "http://$SRV_ADDR" -user alice -device devMain <<<"secret123" >/dev/null 2>&1
+mkdir -p "$WORK/A/cdc" "$WORK/B/cdc"
+python3 - "$WORK/cfg" <<'PYCFG'
+import json, os, sys
+p = os.path.join(sys.argv[1], "config.json")
+c = json.load(open(p))
+c["chunk_threshold_mb"] = 1
+c["cdc_min_kb"] = 64
+c["cdc_avg_kb"] = 128
+c["cdc_max_kb"] = 256
+json.dump(c, open(p, "w"))
+PYCFG
+$YS add "$WORK/A/cdc" --as cdc >/dev/null
+head -c 2097152 /dev/urandom > "$WORK/A/cdc/blob.bin"
+BIN_BEFORE=$(curl -s "http://$SRV_ADDR/metrics" | grep '^ysync_bytes_in_total' | awk '{print $2}')
+$YS sync >/dev/null 2>&1 && ok "CDC 首次上传（2MB）" || bad "CDC 首次上传（2MB）"
+# 中段修改 64KB → 理论仅需重传约 3 个 128KB 块
+dd if=/dev/urandom of="$WORK/A/cdc/blob.bin" bs=1024 seek=1024 count=64 conv=notrunc 2>/dev/null
+BIN_MID=$(curl -s "http://$SRV_ADDR/metrics" | grep '^ysync_bytes_in_total' | awk '{print $2}')
+$YS sync >/dev/null 2>&1 && ok "CDC 增量上传（中段修改）" || bad "CDC 增量上传（中段修改）"
+BIN_AFTER=$(curl -s "http://$SRV_ADDR/metrics" | grep '^ysync_bytes_in_total' | awk '{print $2}')
+DELTA=$((BIN_AFTER - BIN_MID))
+check "增量传输显著小于全量 (<1MB, 实际 ${DELTA}B)" "[ $DELTA -lt 1048576 ]"
+mkdir -p "$WORK/B/cdc"
+$YS_B add "$WORK/B/cdc" --as cdc >/dev/null
+$YS_B sync >"$WORK/b-cdc-sync.log" 2>&1
+check "CDC 文件传播到 B 且逐字节一致" \
+  "[ \"$(md5 -q "$WORK/A/cdc/blob.bin")\" = \"$(md5 -q "$WORK/B/cdc/blob.bin")\" ]"
+
 say ""
 say "== 特性验证结果: PASS=$PASS FAIL=$FAIL =="
 [ $FAIL -eq 0 ]

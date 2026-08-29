@@ -1,0 +1,30 @@
+# y-sync 服务端（含可选 Caddy 自动 HTTPS）
+# 用法: DOMAIN=sync.example.com docker compose up -d
+services:
+  y-sync:
+    build: .
+    image: ysync-server:latest
+    container_name: y-sync
+    restart: unless-stopped
+    volumes:
+      - y-sync-data:/var/lib/y-sync
+    ports:
+      - "127.0.0.1:8720:8720"
+
+  caddy:
+    image: caddy:2
+    container_name: y-sync-caddy
+    restart: unless-stopped
+    depends_on: [y-sync]
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - DOMAIN=${DOMAIN:-sync.example.com}
+
+volumes:
+  y-sync-data:
+  caddy-data:
+  caddy-config:

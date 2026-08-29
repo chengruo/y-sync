@@ -1,0 +1,4 @@
+# y-sync Caddy 反代（自动 HTTPS；替换 DOMAIN 环境变量）
+{$DOMAIN} {
+    reverse_proxy y-sync:8720
+}

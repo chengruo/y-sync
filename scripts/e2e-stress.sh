@@ -37,6 +37,7 @@ cleanup() {
 trap cleanup EXIT
 
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
+pkill -9 -f y-sync-server-rs 2>/dev/null; pkill -9 -f ysyncd-rs 2>/dev/null; pkill -9 -f "ysync-server-rs serve" 2>/dev/null; sleep 0.5
 pkill -f y-sync-server-rs 2>/dev/null; pkill -f ysyncd-rs 2>/dev/null; sleep 0.3
 say "== 压测工作目录: $WORK =="
 say "  实现: server=$(basename "$SERVER_BIN") A=$(basename "$CLIENT_A") B=$(basename "$CLIENT_B")"

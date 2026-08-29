@@ -151,6 +151,14 @@ fn to_serr(e: rusqlite::Error) -> String {
     format!("db: {e}")
 }
 
+/// 内容是否为清单（CDC 分块文件的内容即清单，GET 时重组装）。
+fn is_manifest(conn: &Connection, hash: &str) -> bool {
+    conn.query_row("SELECT 1 FROM manifests WHERE hash=?1", [hash], |_| Ok(()))
+        .is_ok()
+}
+
+
+
 impl Store {
     pub fn open(data_dir: &Path) -> Result<Self, String> {
         std::fs::create_dir_all(data_dir.join("tmp")).map_err(|e| format!("{e}"))?;
@@ -192,7 +200,12 @@ impl Store {
                node_id INTEGER NOT NULL, password_hash TEXT NOT NULL DEFAULT '',
                expires_at INTEGER NOT NULL DEFAULT 0, created INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS meta(
-               key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+               key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS manifests(
+               hash TEXT PRIMARY KEY, size INTEGER NOT NULL, chunks_json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS manifest_chunks(
+               file_hash TEXT NOT NULL, chunk_hash TEXT NOT NULL, idx INTEGER NOT NULL,
+               PRIMARY KEY(file_hash, idx));",
         )
         .map_err(to_serr)?;
         // 幂等迁移：quota_bytes（P1-8）
@@ -597,9 +610,12 @@ impl Store {
                 if op.content_hash.is_empty() {
                     return Err("content_hash required".into());
                 }
+                // P1-8：内容可为普通 blob 或 CDC 清单（清单以原文件哈希为键登记 size）
                 let bsize: i64 = tx
                     .query_row(
-                        "SELECT size FROM blobs WHERE hash=?1",
+                        "SELECT COALESCE(
+                           (SELECT size FROM blobs WHERE hash=?1),
+                           (SELECT size FROM manifests WHERE hash=?1))",
                         [&op.content_hash],
                         |r| r.get(0),
                     )
@@ -1045,6 +1061,74 @@ impl Store {
         })
     }
 
+    // ---------- CDC 清单（P1-8） ----------
+
+    /// 上传清单：以【原文件哈希】为键。验证全部块存在后登记；
+    /// 返回缺失块列表（非空 = 客户端需补传这些块后重试）。
+    pub fn create_manifest(
+        &self,
+        file_hash: &str,
+        size: i64,
+        chunks: &[String],
+    ) -> Result<Vec<String>, String> {
+        if !crate::util::valid_hash(file_hash) || chunks.is_empty() || size <= 0 {
+            return Err("bad manifest".into());
+        }
+        let conn = self.db.lock().unwrap();
+        let mut missing = Vec::new();
+        for c in chunks {
+            let ok: bool = conn
+                .query_row("SELECT 1 FROM blobs WHERE hash=?1", [c], |_| Ok(true))
+                .unwrap_or(false);
+            if !ok {
+                missing.push(c.clone());
+            }
+        }
+        if !missing.is_empty() {
+            return Ok(missing);
+        }
+        // 覆盖旧清单行（同文件重传）
+        conn.execute("DELETE FROM manifest_chunks WHERE file_hash=?1", [file_hash])
+            .map_err(to_serr)?;
+        conn.execute("DELETE FROM manifests WHERE hash=?1", [file_hash])
+            .map_err(to_serr)?;
+        conn.execute(
+            "INSERT INTO manifests(hash, size, chunks_json) VALUES(?1,?2,?3)
+             ON CONFLICT(hash) DO UPDATE SET size=excluded.size, chunks_json=excluded.chunks_json",
+            rusqlite::params![file_hash, size, serde_json::to_string(chunks).unwrap_or_default()],
+        )
+        .map_err(to_serr)?;
+        for (i, c) in chunks.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO manifest_chunks(file_hash, chunk_hash, idx) VALUES(?1,?2,?3)
+                 ON CONFLICT(file_hash, idx) DO NOTHING",
+                rusqlite::params![file_hash, c, i as i64],
+            )
+            .map_err(to_serr)?;
+        }
+        Ok(Vec::new())
+    }
+
+    pub fn is_manifest(&self, hash: &str) -> bool {
+        let conn = self.db.lock().unwrap();
+        conn.query_row("SELECT 1 FROM manifests WHERE hash=?1", [hash], |_| Ok(()))
+            .is_ok()
+    }
+
+    /// 清单信息：chunks（按序）与重组后的总长度。
+    pub fn manifest_info(&self, file_hash: &str) -> Option<(Vec<String>, i64)> {
+        let conn = self.db.lock().unwrap();
+        let (size, chunks_json): (i64, String) = conn
+            .query_row(
+                "SELECT size, chunks_json FROM manifests WHERE hash=?1",
+                [file_hash],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()?;
+        let chunks: Vec<String> = serde_json::from_str(&chunks_json).ok()?;
+        Some((chunks, size))
+    }
+
     // ---------- 设备管理（P1-6） ----------
 
     pub fn list_devices(&self, user_id: i64) -> Result<Vec<serde_json::Value>, String> {
@@ -1404,10 +1488,14 @@ impl Store {
             tx.commit().map_err(to_serr)?;
             n
         };
+
         let hashes: Vec<String> = {
-            let conn = self.db.lock().unwrap();
+            let conn = self.db.lock().unwrap_or_else(|p| p.into_inner());
             let mut stmt = conn
-                .prepare("SELECT hash FROM blobs WHERE refcount<=0")
+                .prepare(
+                    "SELECT hash FROM blobs WHERE refcount<=0
+                     AND hash NOT IN (SELECT chunk_hash FROM manifest_chunks)",
+                )
                 .map_err(to_serr)?;
             let rows = stmt.query_map([], |r| r.get(0)).map_err(to_serr)?;
             rows.filter_map(|r| r.ok()).collect()

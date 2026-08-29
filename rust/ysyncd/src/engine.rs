@@ -958,37 +958,30 @@ impl Engine {
             }
         }
         let snap = crate::ctx::snapshot();
-        let chunk_threshold = snap.chunk_threshold_mb << 20;
-        let chunk_size = snap.chunk_size_mb << 20;
-        // 大文件分块：保持顺序（会话状态机依赖主线程的 st）；普通小文件并行（P1）
+        let cdc_threshold = snap.chunk_threshold_mb << 20;
+        // P1-8 CDC 参数（配置可调，测试可调小）
+        let cdc = crate::chunk::CdcParams::from_config(
+            snap.cdc_min_kb,
+            snap.cdc_avg_kb,
+            snap.cdc_max_kb,
+        );
+        // 大文件走 CDC 增量上传（仅变化块重传）；普通小文件并行
         let mut plain: Vec<(String, String)> = Vec::new();
         for (rel, hash) in &uploads {
             let abs = abs_join(&root, rel);
             let size = scan.get(rel).map(|d| d.size).unwrap_or(0);
-            if size >= chunk_threshold {
-                // FR-S11：大文件分块上传 + 断点续传
-                let sess = st.get_upload_session(rel, hash);
-                let (sess_after, res) = {
-                    let a = &*self.api;
-                    a.put_content_chunked(&abs, sess.as_deref(), hash, size, chunk_size)
-                };
-                match res {
-                    Ok(h) => {
-                        let _ = st.clear_upload_session(rel, hash);
-                        if h != *hash {
-                            return Err(ysync_core::Error::Msg(format!(
-                                "upload {rel}: hash changed during sync"
-                            )));
-                        }
-                        stats.uploaded += 1;
-                    }
-                    Err(e) => {
-                        if !sess_after.is_empty() {
-                            let _ = st.set_upload_session(rel, hash, &sess_after);
-                        }
-                        return Err(ysync_core::Error::Msg(format!("chunked upload {rel}: {e}")));
-                    }
+            if size >= cdc_threshold {
+                // FR-S11/P1-8：CDC 切块 → 缺块补传 → 清单上传
+                let mhash = self.with_api(|a| {
+                    a.put_content_cdc(&abs, hash, size, &cdc)
+                })?;
+                let _ = st.clear_upload_session(rel, hash);
+                if mhash != *hash {
+                    return Err(ysync_core::Error::Msg(format!(
+                        "upload {rel}: hash changed during sync"
+                    )));
                 }
+                stats.uploaded += 1;
             } else {
                 plain.push((rel.clone(), hash.clone()));
             }

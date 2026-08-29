@@ -1,5 +1,6 @@
 //! ysyncd：Rust 客户端 CLI（Go cmd/ysync 的移植，协议与配置文件完全兼容）。
 mod api;
+mod chunk;
 mod conflicts;
 mod ctx;
 mod daemon;

@@ -24,6 +24,7 @@ cleanup(){
 }
 trap cleanup EXIT
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
+pkill -9 -f y-sync-server-rs 2>/dev/null; pkill -9 -f ysyncd-rs 2>/dev/null; pkill -9 -f "ysync-server-rs serve" 2>/dev/null; sleep 0.5
 pkill -f y-sync-server-rs 2>/dev/null; sleep 0.2
 
 say "== 混沌长跑: $ROUNDS 轮（Rust 全实现） =="

@@ -92,6 +92,15 @@ impl BlobStore {
         })
     }
 
+    /// 块文件路径（重组装用）；不存在返回 None。
+    pub fn blob_path_of(&self, hash: &str) -> Option<PathBuf> {
+        if !valid_hash(hash) {
+            return None;
+        }
+        let p = self.blob_path(hash);
+        p.exists().then_some(p)
+    }
+
     pub fn open(&self, hash: &str) -> std::io::Result<std::fs::File> {
         if !valid_hash(hash) {
             return Err(std::io::Error::new(

@@ -38,6 +38,12 @@ pub struct Config {
     pub chunk_threshold_mb: i64,
     #[serde(rename = "chunk_size_mb", default)]
     pub chunk_size_mb: i64,
+    #[serde(rename = "cdc_min_kb", default)]
+    pub cdc_min_kb: i64,
+    #[serde(rename = "cdc_avg_kb", default)]
+    pub cdc_avg_kb: i64,
+    #[serde(rename = "cdc_max_kb", default)]
+    pub cdc_max_kb: i64,
     #[serde(rename = "upload_limit_kbs", default)]
     pub upload_limit_kbs: i64,
     #[serde(rename = "download_limit_kbs", default)]
@@ -51,6 +57,16 @@ impl Config {
         }
         if self.chunk_size_mb == 0 {
             self.chunk_size_mb = 8;
+        }
+        // CDC 分块默认：min 256KB / avg 1MB / max 4MB
+        if self.cdc_min_kb == 0 {
+            self.cdc_min_kb = 256;
+        }
+        if self.cdc_avg_kb == 0 {
+            self.cdc_avg_kb = 1024;
+        }
+        if self.cdc_max_kb == 0 {
+            self.cdc_max_kb = 4096;
         }
     }
 }

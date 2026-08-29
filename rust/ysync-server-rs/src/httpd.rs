@@ -347,6 +347,7 @@ fn send(
     let len = match body {
         Body::Bytes(b) => b.len() as u64,
         Body::File(_, l) => *l,
+        Body::Manifest { len, .. } => *len,
     };
     let mut headers: Vec<(&str, String)> = extra;
     headers.push(("Content-Type", ctype.to_string()));
@@ -370,6 +371,35 @@ fn send(
                 }
                 stream.write_all(&buf[..n])?;
                 remaining -= n as u64;
+            }
+        }
+        Body::Manifest { parts, skip, len } => {
+            // 顺序拼接各块，skip 为起点
+            let mut to_skip = *skip;
+            let mut remaining = *len;
+            for (path, plen) in parts {
+                if remaining == 0 {
+                    break;
+                }
+                if to_skip >= *plen {
+                    to_skip -= plen;
+                    continue;
+                }
+                let Ok(mut f) = std::fs::File::open(path) else { break };
+                use std::io::Seek;
+                let _ = f.seek(std::io::SeekFrom::Start(to_skip));
+                let take_now = (*plen - to_skip).min(remaining);
+                let mut reader = f.take(take_now);
+                let mut buf = [0u8; 64 * 1024];
+                loop {
+                    let n = reader.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    stream.write_all(&buf[..n])?;
+                    remaining -= n as u64;
+                }
+                to_skip = 0;
             }
         }
     }
@@ -457,6 +487,8 @@ fn handle_ws(mut stream: TcpStream, state: &ServerState, req: &Request) -> std::
 pub enum Body {
     Bytes(Vec<u8>),
     File(std::fs::File, u64),
+    /// CDC 清单重组装：按序拼接各块文件，skip 为 Range 起点
+    Manifest { parts: Vec<(std::path::PathBuf, u64)>, skip: u64, len: u64 },
 }
 
 type RouteResult = (u16, String, Body, Vec<(&'static str, String)>);
@@ -658,6 +690,51 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
 
         if m == "GET" && p.starts_with("/api/v1/content/") {
             let hash = p.trim_start_matches("/api/v1/content/");
+            // CDC 清单内容：重组装（Body::Manifest 流式）
+            if state.store.is_manifest(hash) {
+                let Some((chunks, total)) = state.store.manifest_info(hash) else {
+                    return err_json(500, "manifest broken");
+                };
+                let mut parts: Vec<(std::path::PathBuf, u64)> = Vec::with_capacity(chunks.len());
+                let mut missing = Vec::new();
+                for ch in &chunks {
+                    match state.store.blobs.blob_path_of(ch) {
+                        Some(pb) => {
+                            let l = std::fs::metadata(&pb).map(|m| m.len()).unwrap_or(0);
+                            parts.push((pb, l));
+                        }
+                        None => missing.push(ch.clone()),
+                    }
+                }
+                if !missing.is_empty() {
+                    return err_json(500, &format!("missing chunks: {}", missing.join(",")));
+                }
+                let mut headers: Vec<(&'static str, String)> =
+                    vec![("X-Content-SHA256", hash.to_string())];
+                // Range 支持（单区间）
+                if let Some(range) = req.header("Range") {
+                    if let Some((start, end)) = parse_range(&range, total as i64) {
+                        let end = end.min(total as i64 - 1);
+                        let len = (end - start + 1).max(0) as u64;
+                        headers.push((
+                            "Content-Range",
+                            format!("bytes {start}-{end}/{}", total),
+                        ));
+                        return (
+                            206,
+                            "application/octet-stream".into(),
+                            Body::Manifest { parts, skip: start as u64, len: len as u64 },
+                            headers,
+                        );
+                    }
+                }
+                return (
+                    200,
+                    "application/octet-stream".into(),
+                    Body::Manifest { parts, skip: 0, len: total as u64 },
+                    headers,
+                );
+            }
             let mut file = match state.store.blobs.open(hash) {
                 Ok(f) => f,
                 Err(_) => return err_json(404, "content not found"),
@@ -824,6 +901,37 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 Body::File(file, len),
                 vec![],
             );
+        }
+
+        // ---------- CDC 清单（P1-8） ----------
+        if m == "POST" && p == "/api/v1/manifests" {
+            #[derive(serde::Deserialize)]
+            struct MReq {
+                #[serde(rename = "size")]
+                size: i64,
+                #[serde(rename = "file_hash")]
+                file_hash: String,
+                #[serde(rename = "chunks")]
+                chunks: Vec<String>,
+            }
+            let Ok(mr) = serde_json::from_slice::<MReq>(&req.body) else {
+                return err_json(400, "bad manifest");
+            };
+            return match state.store.create_manifest(&mr.file_hash, mr.size, &mr.chunks) {
+                Ok(missing) if missing.is_empty() => ok_json(
+                    serde_json::json!({ "hash": mr.file_hash }),
+                ),
+                Ok(missing) => (
+                    409,
+                    "application/json".into(),
+                    Body::Bytes(
+                        serde_json::to_vec(&serde_json::json!({ "missing": missing }))
+                            .unwrap_or_default(),
+                    ),
+                    vec![],
+                ),
+                Err(e) => err_json(400, &e),
+            };
         }
 
         // ---------- 分块上传（FR-S11） ----------
