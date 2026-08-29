@@ -78,7 +78,8 @@ check "ignore: debug.log 未同步" "test ! -f "$WORK/B/proj/debug.log""
 check "ignore: .syncignore 本身同步" "test -f "$WORK/B/proj/.syncignore""
 
 # mtime 保留（FR-S10）
-mtime_of() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"; }
+if stat -f %m / >/dev/null 2>&1; then MTIME_FMT="-f %m"; else MTIME_FMT="-c %Y"; fi
+mtime_of() { stat $MTIME_FMT "$1"; }
 M1=$(mtime_of "$WORK/A/proj/a.txt"); M2=$(mtime_of "$WORK/B/proj/a.txt")
 say "    (mtime A=$M1 B=$M2)"
 check "mtime 保留" "[ "$M1" = "$M2" ]"
