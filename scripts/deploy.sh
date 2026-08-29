@@ -38,13 +38,16 @@ elif [ -n "${DEPLOY_KEY_FILE:-}" ]; then
   SSH_KEY_ARGS=(-i "$DEPLOY_KEY_FILE")
 fi
 # bash 3.2 兼容：空数组在 set -u 下的展开需要 guard
-SSH_OPTS=(${SSH_KEY_ARGS[@]+"${SSH_KEY_ARGS[@]}"} -p "$DEPLOY_PORT" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+# 注意 ssh 端口是小写 -p，scp 是大写 -P（两者选项集不同，必须分开传）
+BASE_SSH_OPTS=(${SSH_KEY_ARGS[@]+"${SSH_KEY_ARGS[@]}"} -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+SSH_PORT_OPTS=(-p "$DEPLOY_PORT")
+SCP_PORT_OPTS=(-P "$DEPLOY_PORT")
 
 ssh_run() { # 单条远程命令
   if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] ssh $DEPLOY_USER@$DEPLOY_HOST -- $1"
   else
-    ssh "${SSH_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$1"
+    ssh "${BASE_SSH_OPTS[@]}" "${SSH_PORT_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$1"
   fi
 }
 ssh_script() { # 远程脚本：stdin 传入（quoted heredoc，远端变量不与本地混淆）；$1=远程环境变量
@@ -61,7 +64,7 @@ scp_to() {
   if [ "$DRY_RUN" = "1" ]; then
     echo "[dry-run] scp $1 → $DEPLOY_USER@$DEPLOY_HOST:$2"
   else
-    scp -q "${SSH_OPTS[@]}" "$1" "$DEPLOY_USER@$DEPLOY_HOST:$2"
+    scp -q "${BASE_SSH_OPTS[@]}" "${SCP_PORT_OPTS[@]}" "$1" "$DEPLOY_USER@$DEPLOY_HOST:$2"
   fi
 }
 
