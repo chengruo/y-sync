@@ -185,6 +185,9 @@ bash scripts/chaos.sh 8      # 混沌长跑：随机文件操作 + 随机 kill -
 协议细节见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（含省略即零值/null 容忍/chunked
 等跨语言契约；协议 v1 已冻结，双实现共用）。
 
+协议细节见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（含省略即零值/null 容忍/chunked
+等跨语言契约；协议 v1 已冻结，双实现共用）。
+
 e2e 提供 `wait_for` 轮询助手消除时序脆弱性；`E2E_KEEP=1` 保留现场目录供排查。
 
 ## 实现状态对照（REQUIREMENTS.md §8）
