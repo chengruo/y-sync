@@ -56,6 +56,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: 构建 ysyncd sidecar（tauri build script 校验 externalBin 存在）
+        run: |
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          cargo build --release -p ysyncd
+          mkdir -p desktop/src-tauri/binaries
+          cp "target/release/ysyncd" "desktop/src-tauri/binaries/ysyncd-$TRIPLE"
       - name: Check（Tauri 桌面壳）
         run: cargo check -p ysync-desktop
 
