@@ -121,8 +121,9 @@ jobs:
         if: matrix.name == 'macos'
         shell: bash
         run: |
+          # 注意 pipefail：fallback 路径可能不存在，find 非零需中和
           APP="$(find target/release/bundle src-tauri/target/release/bundle -maxdepth 4 \
-            -name '*.app' -type d 2>/dev/null | head -1)"
+            -name '*.app' -type d 2>/dev/null | head -1)" || true
           [ -n "$APP" ] || { echo "::error::未找到 .app"; exit 1; }
           codesign --verify --deep "$APP"
           test -f "$APP/Contents/_CodeSignature/CodeResources"
