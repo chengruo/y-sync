@@ -3,7 +3,7 @@
 // 另一个客户端——不内嵌引擎，GUI 崩溃不影响同步。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -39,6 +39,83 @@ fn connect() -> Option<DaemonHandle> {
     })
 }
 
+/// 定位 ysyncd 可执行文件：环境变量 → 应用同目录（sidecar）→ 常见安装路径。
+fn find_daemon_bin() -> Option<std::path::PathBuf> {
+    const NAME: &str = if cfg!(windows) { "ysyncd.exe" } else { "ysyncd" };
+    if let Ok(p) = std::env::var("YSYNC_DAEMON_BIN") {
+        if !p.is_empty() {
+            return Some(p.into());
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.parent()?.join(NAME);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    for p in [
+        "/usr/local/bin/ysyncd",
+        "/opt/homebrew/bin/ysyncd",
+        "/usr/local/bin/ysync",
+        "/opt/homebrew/bin/ysync",
+    ] {
+        let p = std::path::PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// daemon 未运行时尝试拉起（分离进程，壳退出不影响 daemon，FR-C3）。
+/// 成功与否以 daemon.json 出现/复活为准（read_daemon_info 含 PID 存活检查）。
+fn spawn_daemon() -> bool {
+    let Some(bin) = find_daemon_bin() else {
+        eprintln!("daemon 未运行且未找到 ysyncd 可执行文件");
+        return false;
+    };
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("daemon").stdin(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 新进程组：壳退出/重启不影响 daemon 存活（FR-C3 薄壳原则）
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            eprintln!("daemon 已拉起: {} (pid {})", bin.display(), child.id());
+            true
+        }
+        Err(e) => {
+            eprintln!("daemon 拉起失败: {e}");
+            false
+        }
+    }
+}
+
+/// 确保 daemon 可用：已运行直接成功；否则拉起并轮询 daemon.json 就绪。
+fn ensure_daemon() -> bool {
+    if connect().is_some() {
+        return true;
+    }
+    spawn_daemon();
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        if connect().is_some() {
+            return true;
+        }
+    }
+    false
+}
+
 /// 状态 → 托盘图标：灰=未运行 蓝=同步中 黄=冲突 红=错误 绿=正常
 fn pick_icon(status: Option<&[ysync_core::protocol::FolderStatus]>) -> &'static [u8] {
     let Some(list) = status else {
@@ -59,8 +136,24 @@ fn pick_icon(status: Option<&[ysync_core::protocol::FolderStatus]>) -> &'static 
 }
 
 fn show_manager(app: &AppHandle) -> tauri::Result<()> {
+    if connect().is_none() {
+        ensure_daemon();
+    }
     let Some(d) = connect() else {
-        return Ok(()); // daemon 未运行：托盘已显示灰色，无 URL 可开
+        // daemon 拉起失败：打开说明页（daemon 就绪后轮询线程会自动重导航到管理台）
+        if let Some(w) = app.get_webview_window("manager") {
+            let _ = w.set_focus();
+            return Ok(());
+        }
+        WebviewWindowBuilder::new(
+            app,
+            "manager",
+            WebviewUrl::App("offline.html".into()),
+        )
+        .title("y-sync daemon 未运行")
+        .inner_size(720.0, 480.0)
+        .build()?;
+        return Ok(());
     };
     let url = manager_url(&d)
         .parse::<tauri::Url>()
@@ -119,16 +212,19 @@ fn main() {
                 .show_menu_on_left_click(false)
                 .tooltip("y-sync")
                 .on_menu_event(move |app, event| {
+                    if event.id().as_ref() == "quit" {
+                        app.exit(0);
+                        return;
+                    }
+                    if connect().is_none() {
+                        ensure_daemon();
+                    }
                     let Some(d) = connect() else { return };
                     let r = match event.id().as_ref() {
                         "open" => show_manager(app).map_err(|e| e.to_string()),
                         "sync" => d.client.trigger_sync(None).map_err(|e| e.to_string()),
                         "pause" => d.client.pause("").map_err(|e| e.to_string()),
                         "resume" => d.client.resume("").map_err(|e| e.to_string()),
-                        "quit" => {
-                            app.exit(0);
-                            Ok::<(), String>(())
-                        }
                         _ => Ok(()),
                     };
                     if let Err(e) = r {
@@ -154,9 +250,17 @@ fn main() {
             let app_for_poll = handle.clone();
             std::thread::spawn(move || {
                 let mut last_url: Option<String> = None;
+                // daemon 看门狗：启动即拉起；之后掉线每 30s 重试一次
+                let mut last_spawn = Instant::now() - Duration::from_secs(60);
                 loop {
                 let (icon_bytes, text): (&'static [u8], String) = match connect() {
-                    None => (tray_assets::GRAY, "状态：daemon 未运行".into()),
+                    None => {
+                        if last_spawn.elapsed() >= Duration::from_secs(30) {
+                            last_spawn = Instant::now();
+                            spawn_daemon();
+                        }
+                        (tray_assets::GRAY, "状态：daemon 未运行".into())
+                    }
                     Some(d) => match d.client.status() {
                         Ok(list) => {
                             let icon: &'static [u8] = pick_icon(Some(&list));

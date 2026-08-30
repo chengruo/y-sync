@@ -32,3 +32,6 @@ deploy/deploy.env
 
 # Rust 构建产物
 /target/
+
+# Tauri sidecar 构建注入（CI/本地构建时生成）
+desktop/src-tauri/binaries/

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>y-sync daemon 未运行</title>
+<style>
+  body {
+    font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+    background: #f6f7f9; color: #2c3e50;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 90vh; margin: 0;
+  }
+  .card {
+    max-width: 560px; background: #fff; border-radius: 12px;
+    padding: 32px 40px; box-shadow: 0 2px 12px rgba(0,0,0,.08);
+  }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  .dot {
+    display: inline-block; width: 10px; height: 10px; border-radius: 50%;
+    background: #9aa4af; margin-right: 8px; vertical-align: 1px;
+  }
+  p { line-height: 1.7; font-size: 14px; color: #4a5763; }
+  code {
+    background: #eef1f4; padding: 2px 6px; border-radius: 4px;
+    font-size: 13px; word-break: break-all;
+  }
+  .note { color: #8a949e; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1><span class="dot"></span>y-sync daemon 未运行</h1>
+  <p>桌面壳已尝试自动拉起同步守护进程（ysyncd）但未成功。
+     同步引擎运行在独立的 daemon 进程中，桌面应用只是它的控制客户端。</p>
+  <p><strong>排查建议：</strong></p>
+  <p>
+    1. 确认已安装命令行客户端：<br>
+    <code>curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | bash</code><br><br>
+    2. 手动启动验证报错信息：<br>
+    <code>ysyncd daemon</code><br><br>
+    3. 指定 daemon 路径后重启桌面应用：<br>
+    <code>YSYNC_DAEMON_BIN=/path/to/ysyncd open /Applications/y-sync.app</code>
+  </p>
+  <p class="note">daemon 就绪后本窗口会自动跳转到管理台；也可点击托盘图标重试。</p>
+</div>
+</body>
+</html>

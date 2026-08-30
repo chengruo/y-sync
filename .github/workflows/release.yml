@@ -80,6 +80,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq libwebkit2gtk-4.1-dev build-essential curl wget file \
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - name: 构建 ysyncd sidecar（随应用包分发，桌面壳自动拉起）
+        shell: bash
+        run: |
+          TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          cargo build --release -p ysyncd
+          mkdir -p desktop/src-tauri/binaries
+          EXT=""; [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
+          cp "target/release/ysyncd$EXT" "desktop/src-tauri/binaries/ysyncd-$TRIPLE$EXT"
       - name: Tauri build
         shell: bash
         # 可选 macOS 签名/公证：配置以下 secrets 后 Tauri 自动签名+公证；
@@ -92,6 +100,12 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          # secrets 未配置时映射结果为空字符串；bundler 只认"未设置"，
+          # 故这里把空值 unset 掉，避免误走证书导入路径
+          for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || unset "$v"
+          done
           V="${GITHUB_REF_NAME#v}"
           # 版本号跟随 tag（覆盖 tauri.conf.json 中固定的 0.1.0）
           npx -y @tauri-apps/cli@2 build --config "{\"version\":\"$V\"}"
