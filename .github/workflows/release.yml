@@ -12,31 +12,6 @@ permissions:
   contents: write
 
 jobs:
-  # ---------- Go 冻结产物（不再维护，保留至移除） ----------
-  release-go:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: true
-      - name: Build
-        run: |
-          mkdir -p dist
-          set -e
-          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
-            GOOS="${platform%/*}"; GOARCH="${platform#*/}"
-            EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
-              -o "dist/y-sync-server-${GOOS}-${GOARCH}${EXT}" ./cmd/y-sync-server
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
-              -o "dist/y-sync-${GOOS}-${GOARCH}${EXT}" ./cmd/ysync
-          done
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist-go
-          path: dist/
 
   # ---------- Rust 服务端/客户端 ----------
   release-rust:
@@ -126,7 +101,7 @@ jobs:
   # ---------- 汇总发布 ----------
   publish:
     runs-on: ubuntu-latest
-    needs: [release-go, release-rust, release-desktop]
+    needs: [release-rust, release-desktop]
     steps:
       - uses: actions/checkout@v4
       - name: 汇总产物

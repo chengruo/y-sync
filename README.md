@@ -62,9 +62,7 @@
 ## 构建
 
 ```bash
-go build -o bin/y-sync-server ./cmd/y-sync-server
-go build -o bin/ysync ./cmd/ysync
-# Rust 客户端与桌面壳（可选）
+# Rust 构建（服务端/客户端/桌面包）
 cargo build --release -p ysyncd && cp target/release/ysyncd bin/ysyncd-rs
 cargo build --release -p ysync-desktop   # Tauri 桌面壳
 ```
@@ -100,6 +98,56 @@ open http://127.0.0.1:8730/               # 状态页（冲突/错误可见、�
 
 环境变量：`YSYNC_DATA`（服务端数据目录）、`YSYNC_CONFIG_DIR`（客户端配置目录，
 默认 `~/.config/y-sync/`（macOS: `~/Library/Application Support/y-sync/`））。
+
+## 多客户端 × 多文件夹如何互相同步
+
+一台机器（客户端）可同时接入 N 个文件夹（`ysync add`，FR-S13）；一个文件夹可被
+M 台机器同时同步。机制：
+
+```
+                ┌── 客户端 A（devMain）                    ┌── 客户端 B（devB）
+ ~/code/api  ───┤ folder "api"    cursor=120              ─┤ folder "api"    cursor=118
+ ~/notes     ───┤ folder "notes"  cursor=95   ── 服务端 ── ─┤ folder "notes"  cursor=120
+                └──────────── y-sync-server ──────────────┘
+                      （每用户一棵节点树 + 全局变更日志）
+```
+
+- **服务端是唯一事实源**：每用户一棵节点树（node 稳定 ID，路径只是属性）+
+  一张全局变更日志（changes 表）。任何一个客户端的写入都会追加日志条目
+  （带 device_id 归属）。
+- **每文件夹独立游标**：客户端为每个文件夹记录自己的日志游标，互不干扰——
+  notes 的同步进度不会影响 api。
+- **增量拉取**：客户端凭 `cursor` 调 `GET /sync/changes?cursor=&root=<子树根>`
+  只取该子树、该游标之后的变更，应用到本地（移动语义/冲突副本/水位全量重同步）。
+- **上行两阶段**：先 `PUT /content`（SHA-256 去重），再 `POST /ops` 原子提交
+  元数据；跳过 `device_id` 等于自己的日志条目（避免伪冲突）。
+- **触发源**：FS 事件（2s 防抖）+ WebSocket 推送（服务端只发"有新 cursor"）
+  + 兜底轮询；同一文件夹并发同步被 flock + 进程内标记互斥。
+- **收敛保证**：日志按设备水位裁剪（watermark 下发）；客户端游标落后于水位时
+  自动清空状态全量重同步；kill -9 任意端后重同步收敛（压测/混沌脚本覆盖）。
+
+## 架构
+
+### Rust 实现（与 Go 协议等价，e2e 差分验证）
+
+```
+rust/ysync-core      协议类型/配置/控制客户端（Go 端镜像，Tauri 壳与 ysyncd 共用）
+rust/ysyncd          Rust 客户端（ysync 命令的完整移植：引擎/ignore/分块续传/WS/管理台）
+desktop/src-tauri    Tauri v2 桌面壳：托盘状态灯/菜单/通知，对接 daemon 控制 API
+bin/ysyncd-rs        构建产物（cargo build --release -p ysyncd）
+```
+
+rust/ysync-server-rs  Rust 服务端（Go 版完整移植：存储/变更日志/回收站/版本/分享/
+                      WebDAV/WS 通知/分块上传/backup）
+
+差分验证：`bash scripts/e2e-matrix.sh` —— Go/Rust 服务端 × Go/Rust 客户端共 6 个
+组合运行同一套 76 项 e2e 断言，全部通过视为移植等价。Rust 服务端构建：
+`cargo build --release -p ysync-server-rs && cp target/release/ysync-server-rs bin/`。
+
+### Go 实现（已移除）
+
+> v0.5.x 起项目已完全迁移至 Rust 实现，Go 代码已删除。历史说明与迁移过程见
+> git 历史（v0.2.x–v0.5.x 期间的 REQUIREMENTS.md 记录）。
 
 ## 多客户端 × 多文件夹如何互相同步
 

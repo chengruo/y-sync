@@ -1,15 +1,14 @@
-# y-sync GitLab CI：测试 → 多平台构建 → tag 自动发布（GitLab Release + Generic Package Registry）
+# y-sync GitLab CI：Rust 测试/构建 → tag 自动发布
 #
-# 用法：
-#   - push / MR：跑 test + build
-#   - 推送 tag（如 v0.2.0）：build 后自动创建 Release，并上传全部平台二进制
-#
-# 说明：纯 Go（modernc.org/sqlite 无 cgo），CGO_ENABLED=0 交叉编译无额外依赖。
+# 说明：项目已迁移至 Rust 实现（Go 版已移除）。
 
 stages:
   - test
   - build
   - release
+
+default:
+  interruptible: true
 
 rust:
   stage: test
@@ -43,7 +42,6 @@ rust-build:
       - dist/
     expire_in: 1 week
 
-# 自动部署（tag 推送后手动确认执行；需配置 Variables: DEPLOY_HOST / DEPLOY_USER / DEPLOY_KEY）
 rust-deploy:
   stage: release
   image: rust:latest
@@ -53,91 +51,3 @@ rust-deploy:
   script:
     - apt-get update -qq && apt-get install -y -qq openssh-client git
     - bash scripts/deploy.sh
-
-variables:
-  GOPATH: "$CI_PROJECT_DIR/.gopath"
-  GOCACHE: "$CI_PROJECT_DIR/.gocache"
-
-default:
-  interruptible: true
-
-test:
-  stage: test
-  image: golang:1.22
-  cache:
-    key: gomod
-    paths:
-      - .gopath/pkg/mod
-      - .gocache
-  script:
-    - go vet ./...
-    - go test ./...
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH
-
-build:
-  stage: build
-  image: golang:1.22
-  cache:
-    key: gomod
-    paths:
-      - .gopath/pkg/mod
-      - .gocache
-  script:
-    - mkdir -p dist
-    - |
-      set -e
-      for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
-        GOOS="${platform%/*}"; GOARCH="${platform#*/}"
-        EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
-        echo "== building $GOOS/$GOARCH =="
-        CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
-          -o "dist/y-sync-server-${GOOS}-${GOARCH}${EXT}" ./cmd/y-sync-server
-        CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
-          -o "dist/y-sync-${GOOS}-${GOARCH}${EXT}" ./cmd/ysync
-      done
-    - ls -la dist/
-  artifacts:
-    paths:
-      - dist/
-    expire_in: 1 week
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH
-    - if: $CI_COMMIT_TAG
-
-# tag 推送：二进制上传到 Generic Package Registry，并创建 Release 附资产链接
-release:
-  stage: release
-  image:
-    name: registry.gitlab.com/gitlab-org/release-cli:latest
-    entrypoint: [""]
-  needs:
-    - job: build
-      artifacts: true
-  rules:
-    - if: $CI_COMMIT_TAG
-  script:
-    - echo "发布 $CI_COMMIT_TAG"
-    - |
-      BASE_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/y-sync/${CI_COMMIT_TAG}"
-      for f in dist/*; do
-        name=$(basename "$f")
-        echo "uploading $name ..."
-        curl --fail --silent --show-error \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file "$f" "${BASE_URL}/${name}"
-      done
-    - |
-      ASSETS=""
-      for f in dist/*; do
-        name=$(basename "$f")
-        ASSETS="${ASSETS} --assets-link {\"name\":\"${name}\",\"url\":\"${BASE_URL}/${name}\"}"
-      done
-      release-cli create \
-        --name "y-sync ${CI_COMMIT_TAG}" \
-        --description "轻量文件同步服务 y-sync 发布版本 ${CI_COMMIT_TAG}。二进制包含服务端 y-sync-server 与客户端 ysync（linux/darwin/windows, amd64/arm64）。" \
-        --tag-name "${CI_COMMIT_TAG}" \
-        --ref "${CI_COMMIT_SHA}" \
-        ${ASSETS}

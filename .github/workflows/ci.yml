@@ -15,45 +15,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: true
-      - name: Vet
-        run: go vet ./...
-      - name: Test
-        run: go test ./...
-
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: true
-      - name: Build (matrix in shell)
-        run: |
-          mkdir -p dist
-          set -e
-          for platform in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
-            GOOS="${platform%/*}"; GOARCH="${platform#*/}"
-            EXT=""; [ "$GOOS" = "windows" ] && EXT=".exe"
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
-              -o "dist/y-sync-server-${GOOS}-${GOARCH}${EXT}" ./cmd/y-sync-server
-            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath \
-              -o "dist/y-sync-${GOOS}-${GOARCH}${EXT}" ./cmd/ysync
-          done
-          ls -la dist/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  rust:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check（服务端/客户端 Rust 实现）
@@ -61,21 +22,39 @@ jobs:
       - name: Test
         run: cargo test -p ysync-core -p ysyncd -p ysync-server-rs
 
-  # 端到端验证（C1）：Go/Rust 双端构建后跑主 e2e + 特性验证 + 混沌
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build（多平台 Rust 服务端/客户端）
+        run: |
+          V="${GITHUB_REF_NAME#v}"; V="${V:-$(git rev-parse --short HEAD)}"
+          mkdir -p dist
+          set -e
+          Y_SYNC_VERSION="$V" cargo build --release -p ysync-server-rs --target x86_64-unknown-linux-gnu
+          cargo build --release -p ysyncd --target x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-gnu/release/ysync-server-rs "dist/y-sync-server-rs-linux-amd64-$V"
+          cp target/x86_64-unknown-linux-gnu/release/ysyncd "dist/ysyncd-rs-linux-amd64-$V"
+          ls -la dist/
+
+  rust-desktop:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check（Tauri 桌面壳）
+        run: cargo check -p ysync-desktop
+
+  # 端到端验证（Rust 全实现跑主 e2e + 特性验证 + 混沌）
   e2e:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-          cache: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: 构建 Go 双端
-        run: |
-          go build -o bin/y-sync-server ./cmd/y-sync-server
-          go build -o bin/ysync ./cmd/ysync
       - name: 构建 Rust 双端
         run: |
           cargo build --release -p ysyncd -p ysync-server-rs
@@ -87,15 +66,6 @@ jobs:
         run: bash scripts/e2e-features.sh
       - name: 混沌长跑（6 轮）
         run: bash scripts/chaos.sh 6
-
-  rust-desktop:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check（Tauri 桌面壳）
-        run: cargo check -p ysync-desktop
 
   # 自动部署（需配置 Secrets: DEPLOY_HOST / DEPLOY_USER / DEPLOY_KEY）
   deploy:
@@ -115,8 +85,8 @@ jobs:
       - name: 部署到服务器
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           DEPLOY_VERSION: ${{ github.ref_name }}
           BIN: /tmp/y-sync-server-rs
