@@ -22,34 +22,12 @@ fn main() {
         "serve" => cmd_serve(&args[1..]),
         "adduser" => cmd_adduser(&args[1..]),
         "passwd" => cmd_passwd(&args[1..]),
-        "list-users" => {
-            let store = open_store();
-            for u in store.list_users_with_usage() {
-                let name = u["name"].as_str().unwrap_or("?");
-                let quota = u["quota_bytes"].as_i64().unwrap_or(0);
-                let used = u["used_bytes"].as_i64().unwrap_or(0);
-                let quota_s = if quota > 0 {
-                    format!("{:.2} GB", quota as f64 / 1073741824.0)
-                } else {
-                    "不限".into()
-                };
-                println!("{name:<20} 已用 {:.2} GB  配额 {quota_s}", used as f64 / 1073741824.0);
-            }
-            Ok(())
-        }
-        "gc" => {
-            let store = open_store();
-            match store.gc() {
-                Ok((purged, blobs)) => {
-                    println!("gc: purged {purged} trash entries, removed {blobs} unreferenced blobs");
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
-        }
+        "list-users" => cmd_list_users(),
+        "gc" => cmd_gc(),
         "backup" => cmd_backup(&args[1..]),
         "version" => {
-            println!("y-sync-server-rs v0.1.0 (Rust 服务端, 协议 v1 兼容)");
+            let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
+            println!("y-sync-server-rs v{build} (Rust 服务端, 协议 v1 兼容)");
             Ok(())
         }
         _ => usage(),
@@ -74,9 +52,38 @@ fn usage() -> ! {
   y-sync-server-rs version
 
 环境变量: YSYNC_ADDR / YSYNC_DATA / YSYNC_PASS（免交互密码）
-密码输入: 交互终端下有提示且不回显；管道/重定向时读单行 stdin"#
+密码输入: 交互终端下有提示且不回显；管道/重定向时读单行 stdin
+管理命令: adduser/passwd/gc/backup 需以服务运行用户执行（生产 systemd 模板为 User=y-sync）:
+          sudo -u y-sync YSYNC_DATA=/var/lib/y-sync y-sync-server-rs adduser <name>"#
     );
     std::process::exit(2)
+}
+
+fn cmd_list_users() -> Result<(), String> {
+    let store = open_store()?;
+    for u in store.list_users_with_usage() {
+        let name = u["name"].as_str().unwrap_or("?");
+        let quota = u["quota_bytes"].as_i64().unwrap_or(0);
+        let used = u["used_bytes"].as_i64().unwrap_or(0);
+        let quota_s = if quota > 0 {
+            format!("{:.2} GB", quota as f64 / 1073741824.0)
+        } else {
+            "不限".into()
+        };
+        println!("{name:<20} 已用 {:.2} GB  配额 {quota_s}", used as f64 / 1073741824.0);
+    }
+    Ok(())
+}
+
+fn cmd_gc() -> Result<(), String> {
+    let store = open_store()?;
+    match store.gc() {
+        Ok((purged, blobs)) => {
+            println!("gc: purged {purged} trash entries, removed {blobs} unreferenced blobs");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn data_dir() -> PathBuf {
@@ -86,8 +93,8 @@ fn data_dir() -> PathBuf {
     }
 }
 
-fn open_store() -> Store {
-    Store::open(&data_dir()).expect("open store")
+fn open_store() -> Result<Store, String> {
+    Ok(Store::open(&data_dir()).map_err(|e| format!("open store: {e}"))?)
 }
 
 /// 密码来源：--password 旗标 / YSYNC_PASS 环境变量 / 终端交互。
@@ -163,7 +170,7 @@ fn cmd_adduser(args: &[String]) -> Result<(), String> {
     let Some(name) = name else {
         return Err("usage: y-sync-server-rs adduser <name> [--quota 字节数] [--password 密码]".into());
     };
-    let store = open_store();
+    let store = open_store()?;
     let pw = resolve_password(&name, password)?;
     let id = store.create_user(&name, &pw, quota)?;
     println!("user {name:?} created (id={id}, quota={quota})");
@@ -188,7 +195,7 @@ fn cmd_passwd(args: &[String]) -> Result<(), String> {
     let Some(name) = name else {
         return Err("usage: y-sync-server-rs passwd <name> [--password 密码]".into());
     };
-    let store = open_store();
+    let store = open_store()?;
     let pw = resolve_password(&name, password)?;
     store.reset_password(&name, &pw)?;
     println!("password of {name:?} updated");
@@ -214,7 +221,7 @@ fn cmd_serve(args: &[String]) -> Result<(), String> {
         i += 1;
     }
 
-    let store = open_store();
+    let store = open_store()?;
     let state = std::sync::Arc::new(httpd::ServerState {
         uploads: upload::UploadManager::new(data_dir().join("tmp")),
         hub: hub::Hub::new(),
@@ -268,7 +275,7 @@ fn cmd_backup(args: &[String]) -> Result<(), String> {
     let data = data_dir();
     std::fs::create_dir_all(std::path::Path::new(&out).join("blobs"))
         .map_err(|e| format!("{e}"))?;
-    let store = open_store();
+    let store = open_store()?;
     {
         let conn = store.db.lock().unwrap();
         let snapshot = std::path::Path::new(&out)

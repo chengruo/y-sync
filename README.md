@@ -63,7 +63,8 @@
 
 ```bash
 # Rust 构建（服务端/客户端/桌面包）
-cargo build --release -p ysyncd && cp target/release/ysyncd bin/ysyncd-rs
+cargo build --release -p ysyncd -p ysync-server-rs
+cp target/release/ysyncd bin/ysyncd-rs && cp target/release/ysync-server-rs bin/y-sync-server-rs
 cargo build --release -p ysync-desktop   # Tauri 桌面壳
 ```
 
@@ -71,29 +72,32 @@ cargo build --release -p ysync-desktop   # Tauri 桌面壳
 
 ```bash
 # 1. 启动服务端（可选 TOML：-config，支持 addr/data_dir/max_versions/trash_retention_days）
-./bin/y-sync-server serve -addr 127.0.0.1:8720 -data ./y-sync-data
+./bin/y-sync-server-rs serve -addr 127.0.0.1:8720 -data ./y-sync-data
 
-# 2. 创建用户（脚本场景用 YSYNC_DATA 指定数据目录）
-YSYNC_DATA=./y-sync-data ./bin/y-sync-server adduser alice
+# 2. 创建用户（交互输入密码；脚本用 --password 或 YSYNC_PASS 免交互）
+./bin/y-sync-server-rs adduser alice
+# ⚠️ 生产环境（systemd 部署，服务以 User=y-sync 运行）管理命令必须以同一身份执行，
+#    否则数据库只读、写入报错：
+sudo -u y-sync YSYNC_DATA=/var/lib/y-sync y-sync-server-rs adduser alice
 
 # 3. 设备 A：登录并接入散落项目
-./bin/ysync init -server http://127.0.0.1:8720 -user alice
-./bin/ysync add ~/code/my-project --use-gitignore --exclude node_modules
-./bin/ysync daemon          # 或 ./bin/ysync sync 单次同步
+./bin/ysyncd-rs init -server http://127.0.0.1:8720 -user alice
+./bin/ysyncd-rs add ~/code/my-project --use-gitignore --exclude node_modules
+./bin/ysyncd-rs daemon       # 或 ./bin/ysyncd-rs sync 单次同步
 
 # 4. 设备 B（另一台机器）
-./bin/ysync init -server http://server:8720 -user alice
-./bin/ysync add ~/work/my-project --as my-project
-./bin/ysync install         # 开机自启（launchd/systemd）
+./bin/ysyncd-rs init -server http://server:8720 -user alice
+./bin/ysyncd-rs add ~/work/my-project --as my-project
+./bin/ysyncd-rs install      # 开机自启（launchd/systemd）
 
 # 5. 日常操作
-./bin/ysync status                        # 各文件夹状态
+./bin/ysyncd-rs status                    # 各文件夹状态
 open http://127.0.0.1:8730/               # 状态页（冲突/错误可见、暂停/恢复）
-./bin/ysync trash list && ./bin/ysync trash restore 3
-./bin/ysync versions list my-project src/main.go && ./bin/ysync versions restore my-project src/main.go 12
-./bin/ysync share my-project docs -hours 72 -password pw
-./bin/ysync unshare <token>
-./bin/y-sync-server backup -out ~/backups/2026-08-28   # 服务端
+./bin/ysyncd-rs trash list && ./bin/ysyncd-rs trash restore 3
+./bin/ysyncd-rs versions list my-project src/main.rs && ./bin/ysyncd-rs versions restore my-project src/main.rs 12
+./bin/ysyncd-rs share my-project docs -hours 72 -password pw
+./bin/ysyncd-rs unshare <token>
+./bin/y-sync-server-rs backup -out ~/backups/2026-08-28   # 服务端
 ```
 
 环境变量：`YSYNC_DATA`（服务端数据目录）、`YSYNC_CONFIG_DIR`（客户端配置目录，

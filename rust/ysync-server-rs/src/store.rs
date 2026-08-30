@@ -148,6 +148,19 @@ pub struct Counts {
 }
 
 fn to_serr(e: rusqlite::Error) -> String {
+    // 只读库几乎总是身份/权限问题：数据目录归服务运行用户（部署模板为 y-sync），
+    // 管理命令以其他身份执行时，第一条写语句即报 readonly。给出可操作出路。
+    if let rusqlite::Error::SqliteFailure(err, msg) = &e {
+        if err.code == rusqlite::ffi::ErrorCode::ReadOnly {
+            let detail = msg.clone().unwrap_or_default();
+            return format!(
+                "db: 数据库只读（{detail}）。数据目录归服务运行用户所有，\
+                 管理命令需以同一身份执行，例如：\
+                 sudo -u y-sync YSYNC_DATA=<数据目录> <本命令>；\
+                 若已是该身份，请检查目录属主或磁盘是否变为只读"
+            );
+        }
+    }
     format!("db: {e}")
 }
 
