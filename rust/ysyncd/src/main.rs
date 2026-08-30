@@ -9,6 +9,7 @@ mod engine;
 mod httpd;
 mod ignore;
 mod state;
+mod props;
 mod watcher;
 
 use std::io::{BufRead, Write};

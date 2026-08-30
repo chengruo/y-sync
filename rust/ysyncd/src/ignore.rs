@@ -16,7 +16,7 @@ struct Rule {
 
 #[derive(Debug, Clone, Default)]
 pub struct Ignore {
-    rules: Vec<Rule>,
+    pub(crate) rules: Vec<Rule>,
 }
 
 impl Ignore {

@@ -1362,6 +1362,24 @@ fn handle_browse(state: &ServerState, req: &Request) -> RouteResult {
 
 // ---------- 只读 WebDAV（M4 最小实现：OPTIONS/PROPFIND/GET + Basic Auth） ----------
 
+/// 从 Destination 头提取 DAV 内部路径（剥去 /dav 前缀；兼容绝对 URL / 绝对路径）。
+fn extract_dav_path(dest: &str) -> String {
+    // P0 修复：只用 strip_prefix 做单次剥离（trim_start_matches 会重复剥离，
+    // /dav/davtest/... 会被连续吃掉两段导致路径错乱）
+    // 兼容绝对 URL：剥 scheme://host[:port] 后取 /dav 之后的路径
+    let rest = if let Some(idx) = dest.find("://") {
+        let after_scheme = &dest[idx + 3..];
+        match after_scheme.find('/') {
+            Some(j) => &after_scheme[j..],
+            None => return String::new(),
+        }
+    } else {
+        dest
+    };
+    let p = rest.strip_prefix("/dav").unwrap_or(rest);
+    p.trim_start_matches('/').to_string()
+}
+
 fn handle_dav(state: &ServerState, req: &Request) -> RouteResult {
     let Some(auth) = req.header("Authorization") else {
         return (
@@ -1386,7 +1404,14 @@ fn handle_dav(state: &ServerState, req: &Request) -> RouteResult {
             vec![("WWW-Authenticate", "Basic realm=\"y-sync\"".to_string())],
         );
     };
-    let dav_path = req.path.trim_start_matches("/dav").trim_matches('/').to_string();
+    // strip_prefix 单次剥离 "/dav" 前缀，再去首尾斜杠（trim_start_matches 会重复剥离，
+    // 把 "/dav/davtest/..." 吃成 "test/..." 的教训）
+    let dav_path = req
+        .path
+        .strip_prefix("/dav")
+        .unwrap_or(req.path.as_str())
+        .trim_matches('/')
+        .to_string();
     let nodes = state.store.nodes(uid).unwrap_or_default();
 
     let find_node = |p: &str| -> Option<NodeInfo> {
@@ -1492,6 +1517,38 @@ fn handle_dav(state: &ServerState, req: &Request) -> RouteResult {
                 Body::Bytes(xml.into_bytes()),
                 vec![],
             )
+        }
+        "PUT" => match state.store.dav_put(uid, 0, &dav_path, &req.body) {
+            Ok(()) => (201, "text/plain".into(), Body::Bytes(Vec::new()), vec![]),
+            Err(e) => (409, "text/plain".into(), Body::Bytes(e.into_bytes()), vec![]),
+        },
+        "MKCOL" => match state.store.dav_mkdir(uid, 0, &dav_path) {
+            Ok(()) => (201, "text/plain".into(), Body::Bytes(Vec::new()), vec![]),
+            Err(e) => (405, "text/plain".into(), Body::Bytes(e.into_bytes()), vec![]),
+        },
+        "DELETE" => match state.store.dav_delete(uid, 0, &dav_path) {
+            Ok(()) => (204, "text/plain".into(), Body::Bytes(Vec::new()), vec![]),
+            Err(e) => (409, "text/plain".into(), Body::Bytes(e.into_bytes()), vec![]),
+        },
+        "MOVE" => {
+            let Some(dest) = req.header("Destination") else {
+                return (400, "text/plain".into(), Body::Bytes("missing Destination".as_bytes().to_vec()), vec![]);
+            };
+            let dest_path = extract_dav_path(&dest);
+            match state.store.dav_move(uid, 0, &dav_path, &dest_path) {
+                Ok(()) => (201, "text/plain".into(), Body::Bytes(Vec::new()), vec![]),
+                Err(e) => (409, "text/plain".into(), Body::Bytes(e.into_bytes()), vec![]),
+            }
+        }
+        "COPY" => {
+            let Some(dest) = req.header("Destination") else {
+                return (400, "text/plain".into(), Body::Bytes("missing Destination".as_bytes().to_vec()), vec![]);
+            };
+            let dest_path = extract_dav_path(&dest);
+            match state.store.dav_copy(uid, 0, &dav_path, &dest_path) {
+                Ok(()) => (204, "text/plain".into(), Body::Bytes(Vec::new()), vec![]),
+                Err(e) => (409, "text/plain".into(), Body::Bytes(e.into_bytes()), vec![]),
+            }
         }
         _ => (405, "text/plain".into(), Body::Bytes("method not allowed".as_bytes().to_vec()), vec![]),
     }

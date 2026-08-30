@@ -1116,6 +1116,141 @@ impl Store {
         out
     }
 
+    /// DAV 写操作父节点解析：空路径 = 用户根（id 0）。
+    fn dav_parent(conn: &Connection, user_id: i64, parent_path: &str) -> Result<NodeInfo, String> {
+        eprintln!("DBG dav_parent: uid={user_id} parent={parent_path:?}");
+        if parent_path.is_empty() {
+            return Ok(NodeInfo { id: 0, kind: "dir".into(), ..Default::default() });
+        }
+        #[cfg(feature = "dav-debug")]
+        eprintln!("DBG dav_parent: uid={user_id} path={parent_path:?}");
+        Self::node_by_path(conn, user_id, parent_path)
+    }
+
+    // ---------- WebDAV 写支持（P2） ----------
+
+    /// 按路径查节点（公开封装）。
+    pub fn node_by_path_pub(&self, user_id: i64, path: &str) -> Result<NodeInfo, String> {
+        Self::node_by_path(&self.db.lock().unwrap(), user_id, path)
+    }
+
+    pub fn nodes_count(&self, user_id: i64) -> Result<i64, String> {
+        let conn = self.db.lock().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM nodes WHERE user_id=?1",
+            [user_id],
+            |r| r.get(0),
+        )
+        .map_err(to_serr)
+    }
+
+    /// WebDAV PUT：内容上传 + 元数据落位（复用 ops put 的配额/版本/清单语义）。
+    pub fn dav_put(&self, user_id: i64, device_id: i64, path: &str, body: &[u8]) -> Result<(), String> {
+        let (parent_path, name) = split_path(path);
+        if !Self::valid_name(&name) || name.eq_ignore_ascii_case("Thumbs.db") {
+            return Err("invalid name".into());
+        }
+        // 父目录必须已存在
+        let parent = Self::dav_parent(&self.db.lock().unwrap(), user_id, &parent_path)?;
+        let put = self.blobs.put(body, "").map_err(|e| format!("{e}"))?;
+        let (hash, size) = (put.hash, put.size);
+        self.ensure_blob_row(&hash, size)?;
+        self.apply_ops(
+            user_id,
+            device_id,
+            &[ysync_core::protocol::Op {
+                op: "put".into(),
+                parent_id: parent.id,
+                name: name.to_string(),
+                content_hash: hash,
+                size,
+                mtime: now_millis(),
+                ..Default::default()
+            }],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+    }
+
+    pub fn dav_mkdir(&self, user_id: i64, device_id: i64, path: &str) -> Result<(), String> {
+        let (parent_path, name) = split_path(path);
+        let parent = Self::dav_parent(&self.db.lock().unwrap(), user_id, &parent_path)?;
+        self.apply_ops(
+            user_id,
+            device_id,
+            &[ysync_core::protocol::Op {
+                op: "mkdir".into(),
+                parent_id: parent.id,
+                name: name.to_string(),
+                ..Default::default()
+            }],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+    }
+
+    pub fn dav_delete(&self, user_id: i64, device_id: i64, path: &str) -> Result<(), String> {
+        let node = Self::node_by_path(&self.db.lock().unwrap(), user_id, path)
+            .map_err(|_| ERR_NOT_FOUND.to_string())?;
+        self.apply_ops(
+            user_id,
+            device_id,
+            &[ysync_core::protocol::Op { op: "unlink".into(), node_id: node.id, ..Default::default() }],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+    }
+
+    pub fn dav_move(&self, user_id: i64, device_id: i64, from: &str, to: &str) -> Result<(), String> {
+        let node = Self::node_by_path(&self.db.lock().unwrap(), user_id, from)
+            .map_err(|_| ERR_NOT_FOUND.to_string())?;
+        let (parent_path, name) = split_path(to);
+        let parent = Self::dav_parent(&self.db.lock().unwrap(), user_id, &parent_path)?;
+        self.apply_ops(
+            user_id,
+            device_id,
+            &[ysync_core::protocol::Op {
+                op: "move".into(),
+                node_id: node.id,
+                parent_id: parent.id,
+                name: name.to_string(),
+                ..Default::default()
+            }],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+    }
+
+    pub fn dav_copy(&self, user_id: i64, device_id: i64, from: &str, to: &str) -> Result<(), String> {
+        eprintln!("DBG dav_copy: uid={user_id} from={from:?} to={to:?}");
+        eprintln!("DBG dav_copy: uid={user_id} from={from:?} to={to:?}");
+        let src = match Self::node_by_path(&self.db.lock().unwrap(), user_id, from) {
+            Ok(n) => n,
+            Err(e) => { eprintln!("DBG dav_copy src lookup err: {e}"); return Err(e); }
+        };
+        eprintln!("DBG dav_copy src found: {:?}", src.path);
+        if src.kind != "file" {
+            return Err("copy of dir not supported".into());
+        }
+        let (parent_path, name) = split_path(to);
+        let parent = Self::dav_parent(&self.db.lock().unwrap(), user_id, &parent_path)?;
+        self.apply_ops(
+            user_id,
+            device_id,
+            &[ysync_core::protocol::Op {
+                op: "put".into(),
+                parent_id: parent.id,
+                name: name.to_string(),
+                content_hash: src.content_hash.clone(),
+                size: src.size,
+                mtime: src.mtime,
+                ..Default::default()
+            }],
+        )
+        .map(|_| ())
+        .map_err(|e| format!("{e}"))
+    }
+
     // ---------- CDC 清单（P1-8） ----------
 
     /// 上传清单：以【原文件哈希】为键。验证全部块存在后登记；

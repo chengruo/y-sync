@@ -1,0 +1,16 @@
+{
+  "title": "y-sync 服务端监控",
+  "uid": "ysync-server",
+  "panels": [
+    {"type": "stat", "title": "用户数", "targets": [{"expr": "ysync_users"}], "gridPos": {"x":0,"y":0,"w":4,"h":4}},
+    {"type": "stat", "title": "设备数", "targets": [{"expr": "ysync_devices"}], "gridPos": {"x":4,"y":0,"w":4,"h":4}},
+    {"type": "stat", "title": "文件数", "targets": [{"expr": "ysync_files"}], "gridPos": {"x":8,"y":0,"w":4,"h":4}},
+    {"type": "stat", "title": "存储字节（去重后）", "targets": [{"expr": "ysync_blob_bytes"}], "gridPos": {"x":12,"y":0,"w":4,"h":4}},
+    {"type": "stat", "title": "分享数", "targets": [{"expr": "ysync_shares"}], "gridPos": {"x":16,"y":0,"w":4,"h":4}},
+    {"type": "timeseries", "title": "上行/下行字节", "targets": [{"expr": "ysync_bytes_in_total"}, {"expr": "ysync_bytes_out_total"}], "gridPos": {"x":0,"y":4,"w":12,"h":6}},
+    {"type": "timeseries", "title": "HTTP 请求（按状态码）", "targets": [{"expr": "sum by (code) (ysync_http_requests_status)"}], "gridPos": {"x":12,"y":4,"w":12,"h":6}},
+    {"type": "stat", "title": "运行时长", "targets": [{"expr": "ysync_uptime_seconds"}], "gridPos": {"x":0,"y":10,"w":4,"h":4}},
+    {"type": "stat", "title": "回收站条目", "targets": [{"expr": "ysync_trash_items"}], "gridPos": {"x":4,"y":10,"w":4,"h":4}}
+  ],
+  "schemaVersion": 39
+}

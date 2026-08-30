@@ -288,6 +288,48 @@ $YS_B sync >"$WORK/b-cdc-sync.log" 2>&1
 check "CDC 文件传播到 B 且逐字节一致" \
   "[ \"$(md5 -q "$WORK/A/cdc/blob.bin")\" = \"$(md5 -q "$WORK/B/cdc/blob.bin")\" ]"
 
+# ---------- WebDAV 写支持（P2，自包含：专用用户 + 双端传播）----------
+printf 'davpass\n' | YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" adduser davuser >/dev/null 2>&1 || true
+mkdir -p "$WORK/cfgdav" "$WORK/davA" "$WORK/davB" "$WORK/davA/sub"
+YS_DAV="env YSYNC_CONFIG_DIR=$WORK/cfgdav $CLIENT"
+$YS_DAV init -server "http://$SRV_ADDR" -user davuser -device davdev <<<"davpass" >/dev/null 2>&1
+$YS_DAV add "$WORK/davA" --as davtest >/dev/null
+$YS_DAV sync >/dev/null 2>&1
+mkdir -p "$WORK/B/davtest"
+YS_B2="env YSYNC_CONFIG_DIR=$WORK/cfgB2 $CLIENT"
+$YS_B2 init -server "http://$SRV_ADDR" -user davuser -device devB2 <<<"davpass" >/dev/null 2>&1 || true
+$YS_B2 add "$WORK/B/davtest" --as davtest >/dev/null 2>&1 || true
+
+DAV="http://$SRV_ADDR/dav"
+MKCODE=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -X MKCOL -u davuser:davpass "$DAV/davtest/sub")
+check "DAV MKCOL 建目录 (201)" "[ \"$MKCODE\" = \"201\" ]"
+PUT_CODE=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -X PUT -u davuser:davpass --data-binary "dav-written" "$DAV/davtest/sub/new.txt")
+check "DAV PUT 上传 (201)" "[ \"$PUT_CODE\" = \"201\" ]"
+$YS_DAV sync >/dev/null 2>&1
+check "DAV 写入经同步传播（A 本地落地）" "test -f \"$WORK/davA/sub/new.txt\""
+$YS_B init -server "http://$SRV_ADDR" -user alice -device devB <<<"secret123" >/dev/null 2>&1
+$YS_B add "$WORK/B/davtest" --as davtest >/dev/null 2>&1
+$YS_B sync >/dev/null 2>&1
+$YS_B2 sync >/dev/null 2>&1
+check "DAV 写入传播到 B" "test -f \"$WORK/B/davtest/sub/new.txt\""
+
+CP_BODY=$(curl -s --noproxy '*' -X COPY -u davuser:davpass -H "Destination: $DAV/davtest/sub/copied.txt" "$DAV/davtest/sub/new.txt" -w '\n%{http_code}')
+CP_CODE=$(echo "$CP_BODY" | tail -1)
+check "DAV COPY 复制 (204)" "[ \"$CP_CODE\" = \"204\" ]"
+$YS_DAV sync >/dev/null 2>&1
+check "DAV COPY 后 davuser 落地" "test -f \"$WORK/davA/sub/copied.txt\""
+
+MV_CODE=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -X MOVE -u davuser:davpass -H "Destination: $DAV/davtest/sub/moved.txt" "$DAV/davtest/sub/copied.txt")
+check "DAV MOVE (201)" "[ \"$MV_CODE\" = \"201\" ]"
+$YS_DAV sync >/dev/null 2>&1
+check "DAV MOVE 后落地 moved.txt" "test -f \"$WORK/davA/sub/moved.txt\""
+check "DAV MOVE 后 copied.txt 消失" "[ ! -f \"$WORK/davA/sub/copied.txt\" ]"
+
+DEL_CODE=$(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' -X DELETE -u davuser:davpass "$DAV/davtest/sub/moved.txt")
+check "DAV DELETE (204)" "[ \"$DEL_CODE\" = \"204\" ]"
+$YS_DAV sync >/dev/null 2>&1
+check "DAV DELETE 同步后消失" "[ ! -f \"$WORK/davA/sub/moved.txt\" ]"
+
 say ""
 say "== 特性验证结果: PASS=$PASS FAIL=$FAIL =="
 [ $FAIL -eq 0 ]

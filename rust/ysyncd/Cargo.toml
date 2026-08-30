@@ -24,3 +24,4 @@ filetime = "0.2"
 urlencoding = "2"
 regex = { workspace = true }
 notify = { workspace = true }
+proptest = "1"
