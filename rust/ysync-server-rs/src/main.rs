@@ -7,7 +7,7 @@ mod store;
 mod upload;
 mod util;
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
 use store::Store;
@@ -66,15 +66,15 @@ fn usage() -> ! {
 
 用法:
   y-sync-server-rs serve   [-addr ADDR] [-data DIR]
-  y-sync-server-rs adduser <name>
-  y-sync-server-rs passwd  <name>
+  y-sync-server-rs adduser <name> [--quota 字节数] [--password 密码]
+  y-sync-server-rs passwd  <name> [--password 密码]
   y-sync-server-rs list-users
   y-sync-server-rs gc
   y-sync-server-rs backup -out <dir>
   y-sync-server-rs version
 
-环境变量: YSYNC_ADDR / YSYNC_DATA
-"#
+环境变量: YSYNC_ADDR / YSYNC_DATA / YSYNC_PASS（免交互密码）
+密码输入: 交互终端下有提示且不回显；管道/重定向时读单行 stdin"#
     );
     std::process::exit(2)
 }
@@ -90,15 +90,59 @@ fn open_store() -> Store {
     Store::open(&data_dir()).expect("open store")
 }
 
-fn read_password() -> String {
+/// 密码来源：--password 旗标 / YSYNC_PASS 环境变量 / 终端交互。
+/// 非终端 stdin（管道、heredoc）保持旧行为：读单行（e2e/脚本依赖）。
+fn resolve_password(name: &str, flag: Option<String>) -> Result<String, String> {
+    if let Some(p) = flag.or_else(|| std::env::var("YSYNC_PASS").ok().filter(|v| !v.is_empty())) {
+        if p.is_empty() {
+            return Err("密码不能为空".into());
+        }
+        return Ok(p);
+    }
+    let p1 = read_password(&format!("为用户 {name} 设置密码（输入不回显）: "));
+    if std::io::stdin().is_terminal() {
+        let p2 = read_password("再次输入确认: ");
+        if p1 != p2 {
+            return Err("两次输入不一致".into());
+        }
+    }
+    if p1.is_empty() {
+        return Err("密码不能为空".into());
+    }
+    Ok(p1)
+}
+
+fn read_password(prompt: &str) -> String {
+    if !std::io::stdin().is_terminal() {
+        let mut s = String::new();
+        std::io::stdin().lock().read_line(&mut s).unwrap_or(0);
+        return s.trim().to_string();
+    }
+    // 先关回显再出提示，避免提前键入/粘贴的字符被回显；stty 不可用时退化为普通读入
+    let echo_off = std::process::Command::new("stty")
+        .arg("-echo")
+        .stdin(std::process::Stdio::inherit())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
     let mut s = String::new();
     std::io::stdin().lock().read_line(&mut s).unwrap_or(0);
+    if echo_off {
+        let _ = std::process::Command::new("stty")
+            .arg("echo")
+            .stdin(std::process::Stdio::inherit())
+            .status();
+        println!();
+    }
     s.trim().to_string()
 }
 
 fn cmd_adduser(args: &[String]) -> Result<(), String> {
     let mut name: Option<String> = None;
     let mut quota: i64 = 0; // 0 = 不限
+    let mut password: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -107,28 +151,46 @@ fn cmd_adduser(args: &[String]) -> Result<(), String> {
                 let v = args.get(i).ok_or("--quota 需要参数（字节数，如 10737418240）")?;
                 quota = v.parse().map_err(|_| "--quota 需要字节数")?;
             }
+            "--password" => {
+                i += 1;
+                password = Some(args.get(i).ok_or("--password 需要参数")?.clone());
+            }
             other if !other.starts_with('-') => name = Some(other.to_string()),
             other => return Err(format!("未知参数 {other:?}")),
         }
         i += 1;
     }
     let Some(name) = name else {
-        return Err("usage: y-sync-server-rs adduser <name> [--quota 字节数]".into());
+        return Err("usage: y-sync-server-rs adduser <name> [--quota 字节数] [--password 密码]".into());
     };
     let store = open_store();
-    let pw = read_password();
+    let pw = resolve_password(&name, password)?;
     let id = store.create_user(&name, &pw, quota)?;
     println!("user {name:?} created (id={id}, quota={quota})");
     Ok(())
 }
 
 fn cmd_passwd(args: &[String]) -> Result<(), String> {
-    let Some(name) = args.first() else {
-        return Err("usage: y-sync-server-rs passwd <name>".into());
+    let mut name: Option<String> = None;
+    let mut password: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--password" => {
+                i += 1;
+                password = Some(args.get(i).ok_or("--password 需要参数")?.clone());
+            }
+            other if !other.starts_with('-') => name = Some(other.to_string()),
+            other => return Err(format!("未知参数 {other:?}")),
+        }
+        i += 1;
+    }
+    let Some(name) = name else {
+        return Err("usage: y-sync-server-rs passwd <name> [--password 密码]".into());
     };
     let store = open_store();
-    let pw = read_password();
-    store.reset_password(name, &pw)?;
+    let pw = resolve_password(&name, password)?;
+    store.reset_password(&name, &pw)?;
     println!("password of {name:?} updated");
     Ok(())
 }
