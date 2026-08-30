@@ -82,9 +82,19 @@ jobs:
             libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
       - name: Tauri build
         shell: bash
+        # 可选 macOS 签名/公证：配置以下 secrets 后 Tauri 自动签名+公证；
+        # 未配置时产物为 ad-hoc 签名，用户首次打开需 xattr 移除隔离标记（见 README）。
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           V="${GITHUB_REF_NAME#v}"
-          npx -y @tauri-apps/cli@2 build
+          # 版本号跟随 tag（覆盖 tauri.conf.json 中固定的 0.1.0）
+          npx -y @tauri-apps/cli@2 build --config "{\"version\":\"$V\"}"
           mkdir -p bundle-out
           # workspace 构建：target/ 在仓库根；非 workspace 布局兜底 src-tauri/target
           find target/release/bundle src-tauri/target/release/bundle -maxdepth 3 -type f \
@@ -93,6 +103,16 @@ jobs:
             -exec cp {} bundle-out/ \; || true
           [ -n "$(ls -A bundle-out 2>/dev/null)" ] || { echo "::error::未找到打包产物"; exit 1; }
           ls -la bundle-out/
+      - name: macOS 签名校验门禁
+        if: matrix.name == 'macos'
+        shell: bash
+        run: |
+          APP="$(find target/release/bundle src-tauri/target/release/bundle -maxdepth 4 \
+            -name '*.app' -type d 2>/dev/null | head -1)"
+          [ -n "$APP" ] || { echo "::error::未找到 .app"; exit 1; }
+          codesign --verify --deep "$APP"
+          test -f "$APP/Contents/_CodeSignature/CodeResources"
+          echo "✓ macOS 包签名校验通过: $APP"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-desktop-${{ matrix.name }}
@@ -122,13 +142,23 @@ jobs:
           body: |
             轻量文件同步服务 y-sync 发布版本 ${{ github.ref_name }}。
 
-            **推荐使用 Rust 实现**（Go 实现已冻结）：
             - `ysync-server-rs-*`：Rust 服务端
             - `ysyncd-rs-*`：Rust 客户端（命令行）
-            - `y-sync_*` / `y-sync-*`：桌面安装包（Tauri：托盘 + 管理台）
-            - `y-sync-server-*` / `y-sync-*`（无 rs 后缀）：Go 冻结版（仅存量参考）
+            - `y-sync_*`：桌面安装包（Tauri：托盘 + 管理台）
 
-            一键安装（Linux/macOS）：
+            一键安装（Linux/macOS 命令行）：
             `curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | bash`
+
+            <details>
+            <summary><strong>macOS 桌面应用首次打开提示"已损坏"？</strong></summary>
+
+            这是 Gatekeeper 对未签名应用的隔离标记，应用本身完好。安装后执行：
+
+            ```
+            sudo xattr -rd com.apple.quarantine /Applications/y-sync.app
+            ```
+
+            或：系统设置 → 隐私与安全性 → "仍要打开"。
+            </details>
           files: dist/*
           generate_release_notes: true

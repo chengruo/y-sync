@@ -296,6 +296,23 @@ nginx 配置要点（模板已处理）：WebSocket 反代头（`/api/v1/notify`
   `audit.log`（JSONL：登录成功/失败、每个元数据操作，16MB 轮转）。
 - **一键安装**：`curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | sh`
 
+## macOS 桌面应用安装（Gatekeeper "已损坏"）
+
+桌面应用未做 Apple 开发者签名/公证（需要付费开发者账号）。从浏览器下载的 `.dmg`
+会被 Gatekeeper 打上隔离标记，首次打开提示 **"y-sync已损坏，无法打开"** ——
+应用本身完好，这是签名缺失的标准表现。安装 dmg 后任选其一放行：
+
+```bash
+# 方式一：移除隔离标记（推荐，终端一条命令）
+sudo xattr -rd com.apple.quarantine /Applications/y-sync.app
+
+# 方式二：系统设置 → 隐私与安全性 → 底部"y-sync已损坏"旁 → 仍要打开
+```
+
+注意：用 `curl` 下载的命令行二进制**不会**被打隔离标记，无需以上处理；
+只有经浏览器下载的 `.app`/`.dmg` 受影响。若在 CI 配置了 `APPLE_CERTIFICATE`
+等 secrets，Release 流水线会自动签名+公证，届时不再需要。
+
 ## 已知限制
 
 - 分块上传会话在服务端重启后失效（客户端自动重建会话重传，内容去重降低代价）

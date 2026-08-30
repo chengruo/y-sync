@@ -32,6 +32,8 @@ install_one() { # install_one <asset名> <目标名>
   TMP="$(mktemp)"
   fetch "$1" "$TMP"
   chmod +x "$TMP"
+  # 兜底：curl 下载本身不会被 Gatekeeper 隔离，但复用浏览器下载的缓存/路径时会带上
+  xattr -d com.apple.quarantine "$TMP" 2>/dev/null || true
   mkdir_bin
   if [ -w "$PREFIX/bin" ]; then
     mv "$TMP" "$PREFIX/bin/$2"
