@@ -229,9 +229,20 @@ impl Api {
 
     /// 上传单个内容 blob（块补传用）。
     pub fn put_blob(&self, data: &[u8], want_hash: &str) -> Result<()> {
+        // 分块上传同样计入限速（FR-S12），保证 kill -9 场景击杀落在传输窗口内
+        let owned = data.to_vec();
+        let len = owned.len() as u64;
+        let limiter = self.upload_limiter.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let reader: Box<dyn Read + Send> = match &limiter {
+            Some(l) => Box::new(LimitingReader { inner: std::io::Cursor::new(owned), limiter: Some(l.clone()) }),
+            None => Box::new(std::io::Cursor::new(owned)),
+        };
         let resp = self
-            .req_long("PUT", "/api/v1/content", Some(data.to_vec()))
+            .http_long
+            .put(format!("{}/api/v1/content", self.get_base()))
+            .header("Authorization", format!("Bearer {}", self.get_token()))
             .header("X-Content-SHA256", want_hash)
+            .body(reqwest::blocking::Body::sized(reader, len))
             .send()?;
         check(resp)?;
         Ok(())

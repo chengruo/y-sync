@@ -59,11 +59,11 @@ sync_a(){ $YS_A sync >/dev/null 2>&1 || $YS_A sync >/dev/null 2>&1; }
 sync_b(){ $YS_B sync >/dev/null 2>&1 || $YS_B sync >/dev/null 2>&1; }
 
 kill_client_mid_sync(){
-  # 制造 2MB 上传负载（1MB 分块）→ 后台同步 → 随机时机 kill -9
+  # 制造 2MB 上传负载（512KB/s 限速 ≈ 4s 窗口）→ 后台同步 → ~1.5s 时 kill -9
   head -c $((2097152 + RANDOM * 1024)) /dev/urandom > "$WORK/A/chaos/blob-$RANDOM.bin"
   $YS_A sync >/dev/null 2>&1 &
   local pid=$!
-  sleep "0.$((3 + RANDOM % 6))"
+  sleep 1.5
   kill -9 "$pid" 2>/dev/null && SYNC_KILLS=$((SYNC_KILLS+1))
   wait "$pid" 2>/dev/null
   return 0
