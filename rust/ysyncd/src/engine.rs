@@ -958,6 +958,13 @@ impl Engine {
             }
         }
         let snap = crate::ctx::snapshot();
+        // FR-S12 分时段限速：每轮开始按当前小时重设速率
+        self.api.apply_schedule(
+            &snap.upload_schedule,
+            &snap.download_schedule,
+            snap.upload_limit_kbs,
+            snap.download_limit_kbs,
+        );
         let cdc_threshold = snap.chunk_threshold_mb << 20;
         // P1-8 CDC 参数（配置可调，测试可调小）
         let cdc = crate::chunk::CdcParams::from_config(

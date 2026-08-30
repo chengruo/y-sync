@@ -34,7 +34,9 @@
 - **WebSocket 准实时通知**（§4.2）：服务端只推"有新 cursor"事件，客户端立即拉增量；
   断线自动退化为轮询
 - **选择性同步**（FR-S9）：`ysync add --exclude <子树>`（可多次）
-- **限速**（FR-S12）：配置 `upload_limit_kbs` / `download_limit_kbs`（token bucket）
+- **限速**（FR-S12）：`upload_limit_kbs` / `download_limit_kbs`（token bucket），
+  另支持分时段计划 `upload_schedule` / `download_schedule`（如 `"9-18:512,0-7:10240"`，
+  每轮同步按当前小时查表重设）
 - **daemon 控制 API + Web 管理台**：默认 `127.0.0.1:8730`（token 认证，每次启动随机
   生成），支持：查看各文件夹状态/冲突/错误、暂停/恢复、立即同步、**从网页接入/移除
   文件夹**（含 exclude/use-gitignore）、**冲突处理**（保留当前 / 采用副本，处理为纯
@@ -184,7 +186,11 @@ bash scripts/e2e-features.sh # 特性验证（14 项）：设备管理/吊销、
                              # 审计日志、登录防爆破锁定、用户配额
 bash scripts/chaos.sh 8      # 混沌长跑：随机文件操作 + 随机 kill -9（客户端/服务端），
                              # 终态全树逐字节一致性校验（限速上传窗口内击杀）
+bash scripts/bench.sh 100000 # 规模基准：10 万文件生成/初次上传/无变更对账/
+                             # 单文件修改传播/nodes 全量列举延迟
 ```
+
+nightly CI：混沌 30 轮 + Windows/macOS e2e 矩阵（每日 UTC 2:00 或手动触发）。
 
 协议细节见 [docs/PROTOCOL.md](docs/PROTOCOL.md)（含省略即零值/null 容忍/chunked
 等跨语言契约；协议 v1 已冻结，双实现共用）。
@@ -231,7 +237,8 @@ nginx 配置要点（模板已处理）：WebSocket 反代头（`/api/v1/notify`
   锁定期间即使密码正确也返回 429；成功登录清零。分享密码同样防爆破。
 - **管理台功能**：文件夹状态/暂停恢复/立即同步、接入与移除文件夹、**冲突处理**
   （保留当前/采用副本）、服务端回收站恢复与彻底删除、文件版本浏览与回写、
-  设备吊销。控制台 token 走 X-Ysync-Token 头（页面加载后自动从地址栏移除）。
+  设备吊销、**分享创建/撤销**、**我的用量/配额**、**最近活动（审计）**。
+  控制台 token 走 X-Ysync-Token 头（页面加载后自动从地址栏移除）。
 - **设备管理**：`ysync devices` 列出全部设备（标记当前），`ysync revoke <id>` 吊销
   单台设备（token 立即失效）；管理台同步提供吊销按钮。
 - **用户配额**：服务端 `adduser <name> --quota <字节数>`（0=不限）；PUT 时按增量

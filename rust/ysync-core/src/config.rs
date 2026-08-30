@@ -48,6 +48,12 @@ pub struct Config {
     pub upload_limit_kbs: i64,
     #[serde(rename = "download_limit_kbs", default)]
     pub download_limit_kbs: i64,
+    /// 分时段限速（FR-S12 完整体）："9-18:512,18-24:2048,0-9:0"
+    /// 语义：小时区间:KB/s；0=不限速；未覆盖时段回落 upload/download_limit_kbs
+    #[serde(rename = "upload_schedule", default)]
+    pub upload_schedule: String,
+    #[serde(rename = "download_schedule", default)]
+    pub download_schedule: String,
 }
 
 impl Config {

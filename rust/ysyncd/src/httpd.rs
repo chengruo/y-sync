@@ -234,6 +234,36 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
                 Err(e) => respond(request, 400, &e, "text/plain"),
             }
         }
+        (Method::Get, "/server-shares") => {
+            let shares = daemon.server_shares().unwrap_or_default();
+            respond(request, 200, &serde_json::to_string(&serde_json::json!({ "shares": shares })).unwrap(), "application/json")
+        }
+        (Method::Post, "/share-create") => {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            let folder = v.get("folder").and_then(|x| x.as_str()).unwrap_or("");
+            let rel = v.get("rel").and_then(|x| x.as_str()).unwrap_or("");
+            let hours = v.get("hours").and_then(|x| x.as_i64()).unwrap_or(0);
+            let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
+            match daemon.server_share_create(folder, rel, hours, password) {
+                Ok(info) => respond(request, 200, &serde_json::to_string(&info).unwrap(), "application/json"),
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
+        (Method::Post, "/share-delete") => {
+            let token = json_field_str("token");
+            match daemon.server_share_delete(&token) {
+                Ok(()) => respond(request, 200, "{\"ok\":true}", "application/json"),
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
+        (Method::Get, "/usage") => match daemon.my_usage() {
+            Ok(v) => respond(request, 200, &v.to_string(), "application/json"),
+            Err(e) => respond(request, 400, &e, "text/plain"),
+        },
+        (Method::Get, "/audit") => {
+            let entries = daemon.server_audit(200).unwrap_or_default();
+            respond(request, 200, &serde_json::to_string(&serde_json::json!({ "entries": entries })).unwrap(), "application/json")
+        }
         (Method::Post, "/remove") => {
             let name = json_field_str("name");
             match daemon.remove_folder(&name) {
@@ -310,6 +340,19 @@ const GO_PAGE: &str = r##"<!doctype html>
 <h2>待处理冲突 <span id="ccount" style="font-weight:normal;color:#57606a"></span></h2>
 <div id="conflicts"></div>
 
+<h2>我的用量</h2>
+<div id="usage" style="font-size:13px;color:#57606a"></div>
+
+<h2>分享 <span id="sharecount" style="font-weight:normal;color:#57606a"></span></h2>
+<div class="card">
+ <label>文件夹</label><input type="text" id="sh-folder" placeholder="proj" style="width:18%">
+ <label>路径</label><input type="text" id="sh-rel" placeholder="docs" style="width:28%">
+ <label>有效期(h)</label><input type="text" id="sh-hours" placeholder="0=永久" style="width:12%">
+ <label>密码</label><input type="text" id="sh-pass" style="width:14%">
+ <button onclick="createShare()">创建分享</button>
+</div>
+<div id="shares"></div>
+
 <h2>服务端回收站</h2>
 <div id="strash"></div>
 
@@ -323,6 +366,9 @@ const GO_PAGE: &str = r##"<!doctype html>
 
 <h2>设备 <span id="devcount" style="font-weight:normal;color:#57606a"></span></h2>
 <div id="devices"></div>
+
+<h2>最近活动（审计）</h2>
+<div id="auditbox"></div>
 
 <h2>接入新文件夹</h2>
 <div class="card">
@@ -414,6 +460,23 @@ async function refresh() {
 async function trashOp(op, id) {
   const r = await F("/trash-" + op, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id})});
   if (!r.ok) msg("失败: " + await r.text()); else msg("回收站操作完成");
+  refresh();
+}
+async function createShare() {
+  const folder = document.getElementById("sh-folder").value.trim();
+  const rel = document.getElementById("sh-rel").value.trim();
+  const hours = parseInt(document.getElementById("sh-hours").value || "0");
+  const password = document.getElementById("sh-pass").value;
+  if (!folder || !rel) { msg("请填写文件夹与路径"); return; }
+  const r = await F("/share-create", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({folder, rel, hours, password})});
+  if (!r.ok) { msg("创建失败: " + await r.text()); return; }
+  const info = await r.json();
+  msg("分享已创建: " + info.token + (password ? "（密码 " + password + "）" : ""));
+  refresh();
+}
+async function unshare(token) {
+  const r = await F("/share-delete", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({token})});
+  if (!r.ok) msg("撤销失败: " + await r.text()); else msg("分享已撤销");
   refresh();
 }
 async function revoke(id) {

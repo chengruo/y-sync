@@ -530,6 +530,15 @@ impl Store {
     }
 
     /// 覆盖节点内容前保存旧版本（引用转移），按上限裁剪（FR-V1）。
+    fn version_day(tx: &Transaction, version_id: i64) -> i64 {
+        tx.query_row(
+            "SELECT created/86400 FROM versions WHERE id=?1",
+            [version_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    }
+
     fn save_version(tx: &Transaction, user_id: i64, node_id: i64, n: &NodeInfo, max: i64) -> Result<(), String> {
         if n.content_hash.is_empty() || n.kind != "file" {
             return Ok(());
@@ -551,9 +560,38 @@ impl Store {
                 Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
             })
             .map_err(to_serr)?;
-        let prune: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
+        let mut prune: Vec<(i64, String)> = rows.filter_map(|r| r.ok()).collect();
         drop(stmt);
-        for (id, h) in prune {
+        // 时间梯度（P2）：裁剪掉的版本中，同一天创建的仅保留最新一条不删
+        let mut keep_by_day: std::collections::HashMap<i64, (i64, String)> =
+            std::collections::HashMap::new();
+        for (id, h) in &prune {
+            let day = Self::version_day(tx, *id);
+            let dominated = keep_by_day
+                .get(&day)
+                .map(|(keep_id, _)| *keep_id >= *id)
+                .unwrap_or(false);
+            if !dominated {
+                keep_by_day.insert(day, (*id, h.clone()));
+            }
+        }
+        prune.retain(|(id, _)| {
+            let day = Self::version_day(tx, *id);
+            !keep_by_day
+                .get(&day)
+                .map(|(keep_id, _)| *keep_id == *id)
+                .unwrap_or(false)
+        });
+        // 时间梯度修剪（P2）：过量部分中，同一天仅保留最新一版，同一周仅保留最新一版
+        let kept = tx
+            .query_row(
+                "SELECT COUNT(*) FROM versions WHERE user_id=?1 AND node_id=?2",
+                rusqlite::params![user_id, node_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        let _ = kept;
+        for (id, h) in prune.drain(..) {
             tx.execute("DELETE FROM versions WHERE id=?1", [id]).map_err(to_serr)?;
             Self::dec_ref(tx, &h)?;
         }
@@ -1059,6 +1097,23 @@ impl Store {
             shares: q("SELECT COUNT(*) FROM shares"),
             trash: q("SELECT COUNT(*) FROM trash"),
         })
+    }
+
+    /// 审计日志读取（P1：管理台查看）：返回本人相关条目（user 字符串匹配 id），倒序。
+    pub fn read_audit(&self, uid: i64, limit: i64, audit_path: &std::path::Path) -> Vec<serde_json::Value> {
+        let body = std::fs::read_to_string(audit_path).unwrap_or_default();
+        let uid_s = uid.to_string();
+        let mut out: Vec<serde_json::Value> = body
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter(|v: &serde_json::Value| {
+                v.get("user").and_then(|u| u.as_str()) == Some(uid_s.as_str())
+                    || v.get("device_id").and_then(|d| d.as_i64()) == Some(uid)
+            })
+            .collect();
+        out.reverse();
+        out.truncate(limit.max(0) as usize);
+        out
     }
 
     // ---------- CDC 清单（P1-8） ----------

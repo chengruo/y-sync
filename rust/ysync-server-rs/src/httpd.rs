@@ -838,6 +838,22 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 Err(e) => err_json(500, &e),
             };
         }
+        // P1：我的用量/配额
+        if m == "GET" && p == "/api/v1/me" {
+            let used = state
+                .store
+                .nodes(uid)
+                .map(|ns| ns.iter().filter(|n| n.kind == "file").map(|n| n.size).sum::<i64>())
+                .unwrap_or(0);
+            let quota = state.store.user_quota(uid).unwrap_or(0);
+            return ok_json(serde_json::json!({ "used_bytes": used, "quota_bytes": quota }));
+        }
+        // P1：审计日志查看（返回本人相关条目，倒序）
+        if m == "GET" && p == "/api/v1/audit" {
+            let limit: i64 = req.q("limit").and_then(|v| v.parse().ok()).unwrap_or(100);
+            let entries = state.store.read_audit(uid, limit, &state.audit_path);
+            return ok_json(serde_json::json!({ "entries": entries }));
+        }
         if m == "GET" && p == "/api/v1/trash" {
             return match state.store.list_trash(uid) {
                 Ok(items) => ok_json(serde_json::json!({ "items": items })),

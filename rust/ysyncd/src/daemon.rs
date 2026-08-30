@@ -218,6 +218,33 @@ impl Daemon {
 
     // ---------- 服务端数据管理（P1：管理台代理服务端 API） ----------
 
+    pub fn server_shares(&self) -> Result<Vec<ysync_core::protocol::ShareInfo>, String> {
+        self.engine.api.list_shares().map_err(|e| format!("{e:?}"))
+    }
+    pub fn server_share_create(&self, folder: &str, rel: &str, hours: i64, password: &str) -> Result<ysync_core::protocol::ShareInfo, String> {
+        self.engine
+            .api
+            .create_share(&format!("{folder}/{rel}"), hours, password)
+            .map_err(|e| format!("{e:?}"))
+    }
+    pub fn server_share_delete(&self, token: &str) -> Result<(), String> {
+        self.engine.api.delete_share(token).map_err(|e| format!("{e:?}"))
+    }
+    /// 我的用量/配额（服务端 /api/v1/me）。
+    pub fn my_usage(&self) -> Result<serde_json::Value, String> {
+        self.engine
+            .api
+            .get_json_raw("/api/v1/me")
+            .map_err(|e| format!("{e:?}"))
+    }
+    /// 审计日志查看：服务端 /api/v1/audit?limit=（走管理台 token 的设备身份）。
+    pub fn server_audit(&self, limit: i64) -> Result<Vec<serde_json::Value>, String> {
+        self.engine
+            .api
+            .audit_list(limit)
+            .map_err(|e| format!("{e:?}"))
+    }
+
     pub fn server_trash_list(&self) -> Result<Vec<ysync_core::protocol::TrashItem>, String> {
         self.engine.api.trash_list().map_err(|e| format!("{e:?}"))
     }

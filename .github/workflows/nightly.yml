@@ -1,0 +1,53 @@
+# nightly：混沌长跑（30 轮）+ Windows/macOS e2e 矩阵
+# 手动触发或每日 UTC 2:00 自动运行。失败仅告警（不阻塞主干），但会在 PR 界面可见。
+
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  chaos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22", cache: true }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: 构建双端（Go 服务端 + Rust 客户端）
+        run: |
+          go build -o bin/y-sync-server ./cmd/y-sync-server
+          cargo build --release -p ysyncd
+          cp target/release/ysyncd bin/ysyncd-rs
+      - name: 混沌长跑（30 轮）
+        run: bash scripts/chaos.sh 30
+
+  e2e-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: e2e-${{ matrix.os }}
+      - name: 构建 Rust 服务端 + 客户端
+        shell: bash
+        run: |
+          cargo build --release -p ysyncd -p ysync-server-rs
+          mkdir -p bin
+          cp target/release/ysyncd bin/ysyncd-rs
+          cp target/release/ysync-server-rs bin/y-sync-server-rs
+      - name: 主 e2e（Rust 全实现）
+        shell: bash
+        run: |
+          SERVER_BIN=bin/y-sync-server-rs BIN_A=bin/ysyncd-rs BIN_B=bin/ysyncd-rs \
+            bash scripts/e2e.sh

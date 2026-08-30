@@ -13,8 +13,8 @@ pub struct Api {
     http: reqwest::blocking::Client,
     /// 内容传输：长超时
     http_long: reqwest::blocking::Client,
-    upload_limiter: Option<std::sync::Arc<RateLimiter>>,
-    download_limiter: Option<std::sync::Arc<RateLimiter>>,
+    upload_limiter: std::sync::Mutex<Option<std::sync::Arc<RateLimiter>>>,
+    download_limiter: std::sync::Mutex<Option<std::sync::Arc<RateLimiter>>>,
 }
 
 /// 令牌桶限速（FR-S12）：bytes/sec，突发上限 1 秒配额。
@@ -105,15 +105,47 @@ impl Api {
                 .timeout(std::time::Duration::from_secs(30 * 60))
                 .build()
                 .expect("reqwest long client"),
-            upload_limiter: None,
-            download_limiter: None,
+            upload_limiter: std::sync::Mutex::new(None),
+            download_limiter: std::sync::Mutex::new(None),
         }
     }
 
-    pub fn set_limits(&mut self, upload_kbs: i64, download_kbs: i64) {
-        self.upload_limiter = (upload_kbs > 0).then(|| std::sync::Arc::new(RateLimiter::new(upload_kbs)));
-        self.download_limiter = (download_kbs > 0)
-            .then(|| std::sync::Arc::new(RateLimiter::new(download_kbs)));
+    pub fn set_limits(&self, upload_kbs: i64, download_kbs: i64) {
+        let up = (upload_kbs > 0).then(|| std::sync::Arc::new(RateLimiter::new(upload_kbs)));
+        let down = (download_kbs > 0).then(|| std::sync::Arc::new(RateLimiter::new(download_kbs)));
+        *self.upload_limiter.lock().unwrap_or_else(|p| p.into_inner()) = up;
+        *self.download_limiter.lock().unwrap_or_else(|p| p.into_inner()) = down;
+    }
+
+    /// 分时段限速（FR-S12）：schedule 形如 "9-18:512,18-24:2048,0-9:0"。
+    /// 每轮同步开始时调用：命中时段返回该速率，未覆盖返回 fallback。
+    pub fn apply_schedule(
+        &self,
+        upload_schedule: &str,
+        download_schedule: &str,
+        fallback_up: i64,
+        fallback_down: i64,
+    ) {
+        let hour = now_hour_utc();
+        let lookup = |sched: &str, fallback: i64| -> i64 {
+            for part in sched.split(',') {
+                let Some((range, rate)) = part.split_once(':') else { continue };
+                let Some((a, b)) = range.split_once('-') else { continue };
+                let (Ok(a), Ok(b), Ok(r)) = (
+                    a.trim().parse::<i32>(),
+                    b.trim().parse::<i32>(),
+                    rate.trim().parse::<i64>(),
+                ) else { continue };
+                let h = hour as i32;
+                if h >= a && h < b {
+                    return r;
+                }
+            }
+            fallback
+        };
+        let up = if upload_schedule.is_empty() { fallback_up } else { lookup(upload_schedule, fallback_up) };
+        let down = if download_schedule.is_empty() { fallback_down } else { lookup(download_schedule, fallback_down) };
+        self.set_limits(up, down);
     }
 
     fn req(&self, method: &str, path: &str, body: Option<Vec<u8>>) -> reqwest::blocking::RequestBuilder {
@@ -337,7 +369,7 @@ impl Api {
             return Err(Error::Msg("本地文件哈希与预期不符".into()));
         }
         file.seek(std::io::SeekFrom::Start(0))?;
-        let limiter = self.upload_limiter.clone();
+        let limiter = self.upload_limiter.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let reader = LimitingReader {
             inner: file,
             limiter,
@@ -374,7 +406,7 @@ impl Api {
         ));
         {
             let mut tmp = std::fs::File::create(&tmp_path)?;
-            let limiter = self.download_limiter.clone();
+            let limiter = self.download_limiter.lock().unwrap_or_else(|p| p.into_inner()).clone();
             let mut reader = LimitingReader {
                 inner: &mut resp,
                 limiter,
@@ -489,7 +521,8 @@ impl Api {
                 Ok(n) => n,
                 Err(e) => return wrap(e.into()),
             };
-            if let Some(l) = &self.upload_limiter {
+            let up_snap = self.upload_limiter.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(l) = &up_snap {
                 l.take(n as i64);
             }
             if let Err(e) = self.upload_chunk(&sess_id, i, &buf[..n]) {
@@ -562,7 +595,7 @@ impl Api {
         ));
         {
             let mut f = std::fs::File::create(&tmp)?;
-            let limiter = self.download_limiter.clone();
+            let limiter = self.download_limiter.lock().unwrap_or_else(|p| p.into_inner()).clone();
             let mut reader = LimitingReader {
                 inner: &mut resp,
                 limiter,
@@ -595,6 +628,24 @@ impl Api {
         }
         let resp = self.req("GET", "/api/v1/shares", None).send()?;
         Ok(check(resp)?.json::<R>()?.shares)
+    }
+
+    /// 通用 GET JSON（/api/v1/me、/api/v1/audit 等新端点）。
+    pub fn get_json_raw(&self, path: &str) -> Result<serde_json::Value> {
+        let resp = self.req("GET", path, None).send()?;
+        check(resp)?.json().map_err(Error::from)
+    }
+
+    /// 服务端审计日志（GET /api/v1/audit?limit=N）。
+    pub fn audit_list(&self, limit: i64) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .req("GET", &format!("/api/v1/audit?limit={limit}"), None)
+            .send()?;
+        let v: serde_json::Value = check(resp)?.json()?;
+        Ok(v.get("entries")
+            .and_then(|x| x.as_array())
+            .cloned()
+            .unwrap_or_default())
     }
 
     pub fn devices_list(&self) -> Result<Vec<serde_json::Value>> {
@@ -689,6 +740,13 @@ pub fn set_mtime(path: &Path, mtime_milli: i64) {
     use filetime::FileTime;
     let t = FileTime::from_unix_time(mtime_milli / 1000, (mtime_milli % 1000) as u32 * 1_000_000);
     let _ = filetime::set_file_times(path, t, t);
+}
+
+pub fn now_hour_utc() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| (d.as_secs() / 3600 % 24) as u32)
+        .unwrap_or(0)
 }
 
 pub fn now_millis() -> i64 {
