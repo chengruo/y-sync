@@ -237,6 +237,14 @@ impl Daemon {
             .get_json_raw("/api/v1/me")
             .map_err(|e| format!("{e:?}"))
     }
+    /// 设备列表（管理台用，与 CLI devices 同源）。
+    pub fn devices_list(&self) -> Result<Vec<serde_json::Value>, String> {
+        self.engine.api.devices_list().map_err(|e| format!("{e:?}"))
+    }
+    /// 吊销设备（管理台用）。
+    pub fn device_revoke(&self, id: i64) -> Result<(), String> {
+        self.engine.api.device_revoke(id).map_err(|e| format!("{e:?}"))
+    }
     /// 审计日志查看：服务端 /api/v1/audit?limit=（走管理台 token 的设备身份）。
     pub fn server_audit(&self, limit: i64) -> Result<Vec<serde_json::Value>, String> {
         self.engine
