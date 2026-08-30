@@ -142,6 +142,8 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
     let Some(d) = connect() else {
         // daemon 拉起失败：打开说明页（daemon 就绪后轮询线程会自动重导航到管理台）
         if let Some(w) = app.get_webview_window("manager") {
+            let _ = w.unminimize();
+            let _ = w.show();
             let _ = w.set_focus();
             return Ok(());
         }
@@ -159,6 +161,9 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
         .parse::<tauri::Url>()
         .expect("daemon url");
     if let Some(w) = app.get_webview_window("manager") {
+        // macOS：最小化的窗口仅 set_focus 不会还原，需先解除最小化
+        let _ = w.unminimize();
+        let _ = w.show();
         let _ = w.set_focus();
         return Ok(());
     }
