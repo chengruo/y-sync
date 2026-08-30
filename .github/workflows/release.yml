@@ -19,8 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  name: linux-amd64 }
-          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, name: linux-arm64, cross: "1" }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,  name: linux-amd64, musl: "1" }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl, name: linux-arm64, cross: "1" }
           - { os: macos-latest,   target: aarch64-apple-darwin,      name: darwin-arm64 }
           - { os: macos-latest,   target: x86_64-apple-darwin,       name: darwin-amd64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,    name: windows-amd64 }
@@ -30,12 +30,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: 安装 aarch64 交叉链接器
-        if: matrix.cross == '1'
+      - name: 安装 musl 工具链（静态链接，免宿主 glibc 依赖）
+        if: matrix.musl == '1'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          sudo apt-get install -y -qq musl-tools
+      - name: 安装 cross（aarch64 musl 交叉构建）
+        if: matrix.cross == '1'
+        run: cargo install cross --locked
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
@@ -45,8 +47,10 @@ jobs:
           V="${GITHUB_REF_NAME#v}"
           mkdir -p dist
           export Y_SYNC_VERSION="$V"
+          BUILDER="cargo"
+          [ "${{ matrix.cross }}" = "1" ] && BUILDER="cross"
           for pkg in ysync-server-rs ysyncd; do
-            cargo build --release -p "$pkg" --target "${{ matrix.target }}"
+            $BUILDER build --release -p "$pkg" --target "${{ matrix.target }}"
             SRC="target/${{ matrix.target }}/release"
             NAME="$pkg-${{ matrix.name }}"
             [ -f "$SRC/$pkg" ] && cp "$SRC/$pkg" "dist/$NAME"

@@ -119,8 +119,10 @@ for round in $(seq 1 "$ROUNDS"); do
     3) move_file "$S" ;;
     4) new_file "$S" "deep/a/b/f$RANDOM.txt"; del_file "$S" ;;
   esac
-  # 随机混沌事件
+  # 随机混沌事件；前两轮固定覆盖客户端/服务端击杀（纯随机 6 轮全空的概率 ~18%，曾致 CI 抖动）
   roll=$((RANDOM % 4))
+  [ "$round" = 1 ] && roll=1
+  [ "$round" = 2 ] && roll=2
   case $roll in
     0) sync_a; sync_b ;;
     1) kill_client_mid_sync; sync_a; sync_b ;;
