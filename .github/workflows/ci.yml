@@ -68,6 +68,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: 构建 Rust 双端
         run: |
+          mkdir -p bin
           cargo build --release -p ysyncd -p ysync-server-rs
           cp target/release/ysyncd bin/ysyncd-rs
           cp target/release/ysync-server-rs bin/y-sync-server-rs
