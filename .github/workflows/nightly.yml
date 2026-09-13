@@ -13,17 +13,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: "1.22", cache: true }
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: 构建双端（Go 服务端 + Rust 客户端）
+      - name: 构建 Rust 服务端 + 客户端
         run: |
-          go build -o bin/y-sync-server ./cmd/y-sync-server
-          cargo build --release -p ysyncd
+          cargo build --release -p ysyncd -p ysync-server-rs
+          mkdir -p bin
           cp target/release/ysyncd bin/ysyncd-rs
+          cp target/release/ysync-server-rs bin/y-sync-server-rs
       - name: 混沌长跑（30 轮）
+        env: { E2E_KEEP: "1" }
         run: bash scripts/chaos.sh 30
+      - name: 上传混沌现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chaos-logs
+          path: ${{ env.E2E_WORKDIR }}
+          if-no-files-found: ignore
 
   e2e-matrix:
     strategy:
@@ -48,6 +55,14 @@ jobs:
           cp target/release/ysync-server-rs bin/y-sync-server-rs
       - name: 主 e2e（Rust 全实现）
         shell: bash
+        env: { E2E_KEEP: "1" }
         run: |
           SERVER_BIN=bin/y-sync-server-rs BIN_A=bin/ysyncd-rs BIN_B=bin/ysyncd-rs \
             bash scripts/e2e.sh
+      - name: 上传 e2e 现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs-${{ matrix.os }}
+          path: ${{ env.E2E_WORKDIR }}
+          if-no-files-found: ignore

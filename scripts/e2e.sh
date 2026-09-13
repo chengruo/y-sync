@@ -14,6 +14,17 @@ CLIENT_B="${BIN_B:-$ROOT/bin/ysync}"
 say "  实现组合: server=$(basename $SERVER_BIN) A=$(basename $CLIENT_A) B=$(basename $CLIENT_B)"
 PASS=0; FAIL=0
 
+# 跨平台工具：macOS 有 md5（-q），GNU/Git-Bash 有 md5sum。
+# JSON 字段提取用 sed——Windows 原生 python3 打不开 Git Bash 的 /tmp POSIX 路径（FileNotFoundError）。
+if command -v md5 >/dev/null 2>&1; then
+  md5_of(){ md5 -q "$1"; }
+  md5_pipe(){ md5 -q; }
+else
+  md5_of(){ md5sum "$1" | cut -d' ' -f1; }
+  md5_pipe(){ md5sum | cut -d' ' -f1; }
+fi
+json_field(){ sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n1; }
+
 say()  { echo -e "$1"; }
 ok()   { PASS=$((PASS+1)); say "  \033[32mPASS\033[0m $1"; }
 bad()  { FAIL=$((FAIL+1)); say "  \033[31mFAIL\033[0m $1"; }
@@ -32,6 +43,12 @@ wait_for(){
 
 cleanup() { kill $SERVER_PID 2>/dev/null; [ -n "${E2E_KEEP:-}" ] || rm -rf "$WORK"; }
 trap cleanup EXIT
+
+# CI 中保留现场并记录路径（配合 nightly 的 upload-artifact 排障）
+if [ -n "${GITHUB_ENV:-}" ]; then
+  WD="$WORK"; command -v cygpath >/dev/null 2>&1 && WD=$(cygpath -w "$WORK")
+  echo "E2E_WORKDIR=$WD" >> "$GITHUB_ENV"
+fi
 
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
 say "== e2e 工作目录: $WORK =="
@@ -110,7 +127,7 @@ check "B 侧出现冲突副本"    "[ "$CONFLICTS_B" -ge 1 ]"
 check "两个版本都保留(A)"   "grep -rq 'A-edit' "$WORK/A/proj" && grep -rq 'B-edit' "$WORK/A/proj" && grep -rq 'A-edit' "$WORK/B/proj" && grep -rq 'B-edit' "$WORK/B/proj""
 # 快照对比：路径+内容哈希（排除 .y-sync 状态目录与被忽略的本地文件）
 snap() {
-  (cd "$1" && find . -type f ! -path "./.y-sync/*" ! -name "*.log" | sort | while IFS= read -r f; do printf '%s %s\n' "$(md5 -q "$f")" "$f"; done | md5 -q)
+  (cd "$1" && find . -type f ! -path "./.y-sync/*" ! -name "*.log" | sort | while IFS= read -r f; do printf '%s %s\n' "$(md5_of "$f")" "$f"; done | md5_pipe)
 }
 check "两侧最终收敛一致"     "[ "$(snap "$WORK/A/proj")" = "$(snap "$WORK/B/proj")" ]"
 
@@ -152,10 +169,11 @@ mkdir -p "$WORK/A/notes/sub"
 $YS add "$WORK/A/notes/sub" --as notes-sub >/dev/null 2>&1 && bad "嵌套文件夹应被拒绝" || ok "嵌套文件夹被拒绝"
 
 # ---------- M3: 限速冒烟（FR-S12，验证代码路径）----------
-python3 -c "import json;p='$WORK/cfgA/config.json';c=json.load(open(p));c['upload_limit_kbs']=8192;json.dump(c,open(p,'w'))"
+# 路径经参数传入：MSYS 会把 /tmp 形式的参数转换成 Windows 路径（写在 -c 字符串里则不会）
+python3 -c 'import json,sys;p=sys.argv[1];c=json.load(open(p));c["upload_limit_kbs"]=8192;json.dump(c,open(p,"w"))' "$WORK/cfgA/config.json"
 head -c 1048576 /dev/zero > "$WORK/A/proj/rl.bin"
 $YS sync >/dev/null 2>&1 && ok "限速配置下上传正常" || bad "限速配置下上传正常"
-python3 -c "import json;p='$WORK/cfgA/config.json';c=json.load(open(p));c.pop('upload_limit_kbs',None);json.dump(c,open(p,'w'))"
+python3 -c 'import json,sys;p=sys.argv[1];c=json.load(open(p));c.pop("upload_limit_kbs",None);json.dump(c,open(p,"w"))' "$WORK/cfgA/config.json"
 $YS_B sync >/dev/null 2>&1
 check "限速文件传播到 B" "test -f "$WORK/B/proj/rl.bin""
 
@@ -192,18 +210,11 @@ $YS sync >/dev/null 2>&1; $YS_B sync >/dev/null 2>&1
 check "版本回退传播到 B"      "grep -q 'v2-content' "$WORK/B/proj/a.txt""
 
 # ---------- M2: 分块续传上传（FR-S11，小阈值模拟）----------
-python3 - <<PYJSON
-import json, os
-p = os.path.join("$WORK", "cfgA", "config.json")
-c = json.load(open(p))
-c["chunk_threshold_mb"] = 1
-c["chunk_size_mb"] = 1
-json.dump(c, open(p, "w"))
-PYJSON
+python3 -c 'import json,sys;p=sys.argv[1];c=json.load(open(p));c["chunk_threshold_mb"]=1;c["chunk_size_mb"]=1;json.dump(c,open(p,"w"))' "$WORK/cfgA/config.json"
 head -c 3145728 /dev/zero > "$WORK/A/proj/big.bin"
 $YS sync >/dev/null 2>&1 && ok "分块上传完成" || bad "分块上传完成"
 $YS_B sync >/dev/null 2>&1
-check "大文件传播到 B"        "[ "$(md5 -q "$WORK/A/proj/big.bin")" = "$(md5 -q "$WORK/B/proj/big.bin")" ]"
+check "大文件传播到 B"        "[ "$(md5_of "$WORK/A/proj/big.bin")" = "$(md5_of "$WORK/B/proj/big.bin")" ]"
 
 # ---------- M2: 崩溃恢复（模拟 ops 提交后进程死亡）----------
 echo "crash-recover" > "$WORK/A/proj/crash.txt"
@@ -227,7 +238,7 @@ check "嵌套 ignore: y.txt 同步"   "test -f "$WORK/B/proj/sub2/y.txt""
 $YS daemon -http 127.0.0.1:18731 -interval 60s >"$WORK/daemon.log" 2>&1 &
 DAEMON_PID=$!
 wait_for "daemon 启动并写出 daemon.json" 10 "test -f $WORK/cfgA/daemon.json"
-DAEMON_TOKEN=$(python3 -c "import json;print(json.load(open('$WORK/cfgA/daemon.json'))['token'])")
+DAEMON_TOKEN=$(json_field "$WORK/cfgA/daemon.json" token)
 check "无 token 访问被拒 (401)"  "[ \$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18731/status) = 401 ]"
 check "带 token 可读状态"        "curl -s 'http://127.0.0.1:18731/status?token=$DAEMON_TOKEN' | grep -q proj"
 check "管理页 HTML 可达"         "curl -s 'http://127.0.0.1:18731/?token=$DAEMON_TOKEN' | grep -q '管理台'"
@@ -245,7 +256,7 @@ CODE=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND -u alice:secret123 -H 
 check "WebDAV PROPFIND 207"    "[ "$CODE" = "207" ]"
 CODE2=$(curl -s -o /dev/null -w '%{http_code}' -u alice:secret123 "http://$SRV_ADDR/dav/proj/a.txt")
 check "WebDAV GET 内容"        "[ "$CODE2" = "200" ]"
-TOKEN_A=$(python3 -c "import json,os;print(json.load(open(os.path.join(os.environ.get('YSYNC_CONFIG_DIR','$WORK/cfgA'),'config.json')))['token'])")
+TOKEN_A=$(json_field "$WORK/cfgA/config.json" token)
 check "浏览页可达"             "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=proj' | grep -q a.txt"
 
 # ---------- M3: backup（SR5）----------
@@ -264,7 +275,7 @@ mkdir -p "$WORK/A/uiadd"
 echo "from-ui" > "$WORK/A/uiadd/hello.txt"
 ADD_R=$(api_post add "{\"local_path\":\"$WORK/A/uiadd\",\"name\":\"uiadd\",\"excludes\":[\"node_modules\"]}")
 check "管理台接入文件夹 (POST /add)" 'echo "$ADD_R" | grep -q ok'
-TOKEN_A=${TOKEN_A:-$(python3 -c "import json;print(json.load(open('$WORK/cfgA/config.json'))['token'])")}
+TOKEN_A=${TOKEN_A:-$(json_field "$WORK/cfgA/config.json" token)}
 wait_for "接入后 daemon 自动上行" 15 "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=uiadd' | grep -q hello.txt"
 $YS_B add "$WORK/B/uiadd" --as uiadd >/dev/null
 $YS_B sync >/dev/null 2>&1
@@ -306,7 +317,11 @@ check "管理台移除文件夹 (POST /remove)" 'echo "$REM_R" | grep -q ok'
 check "移除后状态不再包含"      "! curl -s "http://127.0.0.1:18731/status?token=$DAEMON_TOKEN" | grep -q uiadd"
 kill $DAEMON_PID 2>/dev/null
 wait $DAEMON_PID 2>/dev/null
-check "daemon 退出清理 daemon.json" "[ ! -f "$WORK/cfgA/daemon.json" ]"
+# Windows 的 kill 是 TerminateProcess，无优雅退出路径，不能清理 daemon.json——只验证进程已终止
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) check "daemon 进程已终止 (Windows)" "! kill -0 $DAEMON_PID 2>/dev/null" ;;
+  *)                    check "daemon 退出清理 daemon.json" "[ ! -f "$WORK/cfgA/daemon.json" ]" ;;
+esac
 
 # ---------- 幂等重同步（无变更应安静收敛）----------
 $YS sync >/dev/null 2>&1 && $YS_B sync >/dev/null 2>&1 && ok "重复同步幂等" || bad "重复同步幂等"

@@ -513,7 +513,9 @@ impl Daemon {
             }
         });
 
-        // 信号等待（Windows 无 signal-hook iterator：依赖服务管理器终止，daemon.json 残留可忽略）
+        // 信号等待：unix 用 signal-hook 阻塞主线程并在退出时清理 daemon.json。
+        // Windows 无 signal-hook iterator，必须显式驻留主线程——否则 run() 立即返回、
+        // 进程退出，控制 API/WS/轮询线程全部随之终止（daemon.json 虽写出但服务不可达）。
         #[cfg(unix)]
         {
             if let Ok(mut signals) = signal_hook::iterator::Signals::new([
@@ -528,6 +530,11 @@ impl Daemon {
                     std::process::exit(0);
                 }
             }
+        }
+        #[cfg(windows)]
+        loop {
+            // 终止依赖外部 kill（TerminateProcess），daemon.json 残留可忽略
+            std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
 }

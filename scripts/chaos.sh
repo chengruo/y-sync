@@ -18,11 +18,23 @@ say(){ echo -e "$1"; }
 ok(){ PASS=$((PASS+1)); say "  \033[32mPASS\033[0m $1"; }
 bad(){ FAIL=$((FAIL+1)); say "  \033[31mFAIL\033[0m $1"; }
 
+# 跨平台 md5：macOS 有 md5 -q，GNU/Linux 用 md5sum（没有 md5 命令，缺它会退化成只比文件名）
+if command -v md5 >/dev/null 2>&1; then
+  md5_of(){ md5 -q "$1"; }
+else
+  md5_of(){ md5sum "$1" | cut -d' ' -f1; }
+fi
+
 cleanup(){
   [ -n "${SERVER_PID:-}" ] && kill -9 "$SERVER_PID" 2>/dev/null
   [ -n "${E2E_KEEP:-}" ] || rm -rf "$WORK"
 }
 trap cleanup EXIT
+# CI 中保留现场并记录路径（配合 nightly 的 upload-artifact 排障）
+if [ -n "${GITHUB_ENV:-}" ]; then
+  WD="$WORK"; command -v cygpath >/dev/null 2>&1 && WD=$(cygpath -w "$WORK")
+  echo "E2E_WORKDIR=$WD" >> "$GITHUB_ENV"
+fi
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
 pkill -9 -f y-sync-server-rs 2>/dev/null; pkill -9 -f ysyncd-rs 2>/dev/null; pkill -9 -f "ysync-server-rs serve" 2>/dev/null; sleep 0.5
 pkill -f y-sync-server-rs 2>/dev/null; sleep 0.2
@@ -40,15 +52,8 @@ $YS_A init -server "http://$SRV_ADDR" -user alice -device devA <<<"secret123" >/
 $YS_B init -server "http://$SRV_ADDR" -user alice -device devB <<<"secret123" >/dev/null 2>&1
 mkdir -p "$WORK/A/chaos" "$WORK/B/chaos"
 # A 端小分块阈值：保证每轮都有可击杀的分块上传窗口（顺带覆盖断点续传）
-python3 - <<PYJSON
-import json, os
-p = os.path.join("$WORK", "cfgA", "config.json")
-c = json.load(open(p))
-c["chunk_threshold_mb"] = 1
-c["chunk_size_mb"] = 1
-c["upload_limit_kbs"] = 256  # 拉长上传窗口，保证 kill -9 落在分块上传中
-json.dump(c, open(p, "w"))
-PYJSON
+# 路径经参数传入：MSYS(Git Bash) 会把 /tmp 形式的参数转换成 Windows 路径（写在 -c 字符串里则不会）
+python3 -c 'import json,sys;p=sys.argv[1];c=json.load(open(p));c["chunk_threshold_mb"]=1;c["chunk_size_mb"]=1;c["upload_limit_kbs"]=256;json.dump(c,open(p,"w"))' "$WORK/cfgA/config.json"
 $YS_A add "$WORK/A/chaos" >/dev/null
 $YS_B add "$WORK/B/chaos" >/dev/null
 $YS_A sync >/dev/null 2>&1; $YS_B sync >/dev/null 2>&1
@@ -136,8 +141,8 @@ say "  -- 收敛与一致性校验 --"
 # 双端各同步至多 3 轮到稳定
 for i in 1 2 3; do sync_a; sync_b; done
 
-A_SNAP=$(cd "$WORK/A/chaos" && find . -type f ! -path "./.y-sync/*" ! -name "*.lock" | sort | while IFS= read -r f; do printf '%s %s\n' "$(md5 -q "$f")" "$f"; done)
-B_SNAP=$(cd "$WORK/B/chaos" && find . -type f ! -path "./.y-sync/*" ! -name "*.lock" | sort | while IFS= read -r f; do printf '%s %s\n' "$(md5 -q "$f")" "$f"; done)
+A_SNAP=$(cd "$WORK/A/chaos" && find . -type f ! -path "./.y-sync/*" ! -name "*.lock" | sort | while IFS= read -r f; do printf '%s %s\n' "$(md5_of "$f")" "$f"; done)
+B_SNAP=$(cd "$WORK/B/chaos" && find . -type f ! -path "./.y-sync/*" ! -name "*.lock" | sort | while IFS= read -r f; do printf '%s %s\n' "$(md5_of "$f")" "$f"; done)
 if [ "$A_SNAP" = "$B_SNAP" ]; then
   ok "终态一致性：A 与 B 全树逐字节一致（$(echo "$A_SNAP" | wc -l | tr -d ' ') 个文件）"
 else
