@@ -271,9 +271,13 @@ api_post(){ # 用法: api_post <path> <json>；绕开 check/eval 的引号问题
 }
 
 # 4a. 通过管理台接入新文件夹
+# JSON body 不经 MSYS 参数转换：Windows 下 daemon（原生进程）会把 /tmp/... 解析到当前盘符根目录，
+# 必须先转成原生路径（cygpath -m 用正斜杠，避免 JSON 反斜杠转义问题）
+UIADD_DIR="$WORK/A/uiadd"
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) UIADD_DIR=$(cygpath -m "$WORK/A/uiadd") ;; esac
 mkdir -p "$WORK/A/uiadd"
 echo "from-ui" > "$WORK/A/uiadd/hello.txt"
-ADD_R=$(api_post add "{\"local_path\":\"$WORK/A/uiadd\",\"name\":\"uiadd\",\"excludes\":[\"node_modules\"]}")
+ADD_R=$(api_post add "{\"local_path\":\"$UIADD_DIR\",\"name\":\"uiadd\",\"excludes\":[\"node_modules\"]}")
 check "管理台接入文件夹 (POST /add)" 'echo "$ADD_R" | grep -q ok'
 TOKEN_A=${TOKEN_A:-$(json_field "$WORK/cfgA/config.json" token)}
 wait_for "接入后 daemon 自动上行" 15 "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=uiadd' | grep -q hello.txt"
