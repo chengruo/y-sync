@@ -14,6 +14,12 @@ PASS=0; FAIL=0
 say(){ echo -e "$1"; }
 ok(){ PASS=$((PASS+1)); say "  \033[32mPASS\033[0m $1"; }
 bad(){ FAIL=$((FAIL+1)); say "  \033[31mFAIL\033[0m $1"; }
+# 跨平台 md5：macOS 有 md5 -q，GNU/Linux 用 md5sum（没有 md5 命令，缺它会让比对空转通过）
+if command -v md5 >/dev/null 2>&1; then
+  md5_of(){ md5 -q "$1"; }
+else
+  md5_of(){ md5sum "$1" | cut -d' ' -f1; }
+fi
 check(){ if eval "$2"; then ok "$1"; else bad "$1 — [$2]"; fi }
 wait_for(){
   local desc="$1" t="$2" cond="$3" end
@@ -51,7 +57,7 @@ mkdir -p "$WORK/B"
 $YS_B add "$WORK/B/proj" --as proj >/dev/null
 $YS_B sync >/dev/null 2>&1
 $YS add "$WORK/proj" >/dev/null && $YS sync >/dev/null 2>&1
-check "设备列表包含当前设备" "$YS devices | grep -q '当前设备'"
+check "设备列表包含当前设备" "$YS devices | grep '当前设备' >/dev/null"
 # 登录第二台设备并吊销（ghost 用独立配置目录，避免覆盖主设备 token）
 mkdir -p "$WORK/cfgghost"
 YS_GHOST="env YSYNC_CONFIG_DIR=$WORK/cfgghost $CLIENT"
@@ -65,10 +71,10 @@ TOK_GHOST=$($YS devices >/dev/null 2>&1; python3 -c "pass" 2>/dev/null; echo "")
 
 # ---------- /metrics（P1-7） ----------
 M=$(curl -s "http://$SRV_ADDR/metrics")
-check "metrics: 用户数"        'echo "$M" | grep -q "^ysync_users 1$"'
-check "metrics: 文件数"        'echo "$M" | grep -q "^ysync_files 1$"'
-check "metrics: blob 字节数"   'echo "$M" | grep -q "^ysync_blob_bytes [1-9]"'
-check "metrics: HTTP 计数"     'echo "$M" | grep -q "^ysync_http_requests_total [0-9]"'
+check "metrics: 用户数"        'echo "$M" | grep "^ysync_users 1$" >/dev/null'
+check "metrics: 文件数"        'echo "$M" | grep "^ysync_files 1$" >/dev/null'
+check "metrics: blob 字节数"   'echo "$M" | grep "^ysync_blob_bytes [1-9]" >/dev/null'
+check "metrics: HTTP 计数"     'echo "$M" | grep "^ysync_http_requests_total [0-9]" >/dev/null'
 
 # ---------- 审计日志（P1-7） ----------
 check "审计日志存在"           "test -f $SRV_DATA/audit.log"
@@ -82,12 +88,12 @@ $YS_SETUP daemon -http 127.0.0.1:18799 -interval 60s >"$WORK/setup-daemon.log" 2
 SETUP_PID=$!
 wait_for "setup daemon 启动" 10 "test -f $WORK/cfgsetup/daemon.json"
 SETUP_TOKEN=$(python3 -c "import json;print(json.load(open('$WORK/cfgsetup/daemon.json'))['token'])")
-check "setup 状态: 未初始化"   'curl -s "http://127.0.0.1:18799/setup-status?token='"$SETUP_TOKEN"'" | grep -q initialized.:false'
+check "setup 状态: 未初始化"   'curl -s "http://127.0.0.1:18799/setup-status?token='"$SETUP_TOKEN"'" | grep initialized.:false >/dev/null'
 SETUP_BODY="{\"server_url\":\"http://$SRV_ADDR\",\"user\":\"alice\",\"password\":\"secret123\",\"device_name\":\"devSetup\"}"
 SETUP_R=$(curl -s -m 15 -X POST "http://127.0.0.1:18799/setup?token=$SETUP_TOKEN" -H "Content-Type: application/json" -d "$SETUP_BODY")
-check "setup 完成配置 (POST /setup)"   'echo "$SETUP_R" | grep -q initialized'
+check "setup 完成配置 (POST /setup)"   'echo "$SETUP_R" | grep initialized >/dev/null'
 check "setup 后配置文件落盘" "test -f $WORK/cfgsetup/config.json"
-check "setup 状态: 已初始化"   'curl -s "http://127.0.0.1:18799/setup-status?token='"$SETUP_TOKEN"'" | grep -q initialized.:true'
+check "setup 状态: 已初始化"   'curl -s "http://127.0.0.1:18799/setup-status?token='"$SETUP_TOKEN"'" | grep initialized.:true >/dev/null'
 mkdir -p "$WORK/setup-f"
 echo "setup-f" > "$WORK/setup-f/s.txt"
 $YS_SETUP add "$WORK/setup-f" >/dev/null
@@ -95,7 +101,7 @@ SETUP_STATUS=$(curl -s -m 5 "http://127.0.0.1:18799/status?token=$SETUP_TOKEN")
 curl -s -m 5 -X POST "http://127.0.0.1:18799/sync?token=$SETUP_TOKEN" >/dev/null
 sleep 2
 SETUP_STATUS=$(curl -s -m 5 "http://127.0.0.1:18799/status?token=$SETUP_TOKEN")
-check "setup 后 daemon 拉起同步" 'echo "$SETUP_STATUS" | grep -q setup-f'
+check "setup 后 daemon 拉起同步" 'echo "$SETUP_STATUS" | grep setup-f >/dev/null'
 kill "$SETUP_PID" 2>/dev/null; wait "$SETUP_PID" 2>/dev/null
 
 # ---------- 日志水位（A1）----------
@@ -129,7 +135,7 @@ items=[x for x in json.load(sys.stdin)['items'] if x['orig_path']=='par/p1.txt']
 print(items[0]['id'] if items else '')")
 check "控制台列出服务端回收站" "[ -n \"$TR_ID\" ]"
 R=$(curl -s -X POST "http://127.0.0.1:18800/trash-restore?token=$CTL_TOKEN" -H 'Content-Type: application/json' -d "{\"id\":$TR_ID}")
-check "控制台恢复回收站条目" 'echo "$R" | grep -q ok'
+check "控制台恢复回收站条目" 'echo "$R" | grep ok >/dev/null'
 curl -s -X POST "http://127.0.0.1:18800/sync?token=$CTL_TOKEN" >/dev/null; sleep 1
 $YS_B sync >/dev/null 2>&1
 check "恢复传播回两端" "test -f "$WORK/par/p1.txt" && test -f "$WORK/B/par/p1.txt""
@@ -142,7 +148,7 @@ YS_B="env YSYNC_CONFIG_DIR=$WORK/cfgB $CLIENT"
 kill "$SERVER_PID" 2>/dev/null; sleep 0.3
 YSYNC_JOURNAL_KEEP=5 YSYNC_JOURNAL_TRIM_MIN=0 YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
-wait_for "服务端重启（保留 5 条日志）" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
+wait_for "服务端重启（保留 5 条日志）" 10 "curl -s http://$SRV_ADDR/healthz | grep ok >/dev/null"
 mkdir -p "$WORK/A/wm"
 for i in $(seq 1 10); do echo "wm-$i" > "$WORK/A/wm/f$i.txt"; done
 $YS add "$WORK/A/wm" --as wm >/dev/null
@@ -161,12 +167,12 @@ check "重同步后 B 数据完整" "[ $(find "$WORK/B/wm" -name 'f*.txt' | wc -
 kill "$SERVER_PID" 2>/dev/null; sleep 0.3
 YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
-wait_for "服务端恢复" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
+wait_for "服务端恢复" 10 "curl -s http://$SRV_ADDR/healthz | grep ok >/dev/null"
 
 # ---------- nodes 分页（P0-1）----------
 TOKQ=$(python3 -c "import json;print(json.load(open('$WORK/cfg/config.json'))['token'])")
 P1=$(curl -s "http://$SRV_ADDR/api/v1/nodes?limit=1&after=0&token=$TOKQ")
-check "nodes 分页: 第一页 has_more" 'echo "$P1" | grep -q '"'"'has_more":true'"'"''
+check "nodes 分页: 第一页 has_more" 'echo "$P1" | grep '"'"'has_more":true'"'"' >/dev/null'
 PAGE_IDS=$(python3 -c "
 import json,urllib.request
 tok='$TOKQ'; base='$SRV_ADDR'; after=0; ids=[]
@@ -213,7 +219,7 @@ CASE_INSENSITIVE_FS=false
 [ -e "$WORK/proj/CASE.TXT.PROBE" ] && CASE_INSENSITIVE_FS=true
 rm -f "$WORK/proj/case.txt.probe" "$WORK/proj/CASE.TXT.PROBE" 2>/dev/null
 if [ "$CASE_INSENSITIVE_FS" = true ]; then
-  check "不敏感FS: 副本落地"     "ls $WORK/proj | grep -q 'case conflict'"
+  check "不敏感FS: 副本落地"     "ls $WORK/proj | grep 'case conflict' >/dev/null"
   CCFILE=$(ls $WORK/proj/*case*conflict* 2>/dev/null | head -1)
   check "不敏感FS: 副本内容正确" "[ -n \"$CCFILE\" ] && grep -q other-case \"$CCFILE\""
 else
@@ -252,10 +258,10 @@ $YS add "$WORK/bob" >/dev/null
 $YS sync >/dev/null 2>&1
 TOKQ=$(python3 -c "import json;print(json.load(open('$WORK/cfg/config.json'))['token'])")
 NODES_Q=$(curl -s -H "Authorization: Bearer $TOKQ" "http://$SRV_ADDR/api/v1/nodes")
-check "超配额上传被拒绝（服务端无该文件）" 'echo "$NODES_Q" | grep -qv "big.bin"'
+check "超配额上传被拒绝（服务端无该文件）" 'echo "$NODES_Q" | grep -v "big.bin" >/dev/null'
 check "引擎记录 put 失败待重试" 'grep -q "op_failed" "$SRV_DATA/audit.log"' 
 check "list-users 显示配额与用量" \
-  "YSYNC_DATA='$SRV_DATA' '$SERVER_BIN' list-users | grep -qE 'bob.*配额 0.00 GB|bob.*已用'"
+  "YSYNC_DATA='$SRV_DATA' '$SERVER_BIN' list-users | grep -E 'bob.*配额 0.00 GB|bob.*已用' >/dev/null"
 
 # ---------- CDC 增量上传（P1-8，小分块配置）----------
 # 配额场景把 cfg 换成了 bob——CDC 场景前切回 alice
@@ -286,7 +292,7 @@ mkdir -p "$WORK/B/cdc"
 $YS_B add "$WORK/B/cdc" --as cdc >/dev/null
 $YS_B sync >"$WORK/b-cdc-sync.log" 2>&1
 check "CDC 文件传播到 B 且逐字节一致" \
-  "[ \"$(md5 -q "$WORK/A/cdc/blob.bin")\" = \"$(md5 -q "$WORK/B/cdc/blob.bin")\" ]"
+  "[ \"$(md5_of "$WORK/A/cdc/blob.bin")\" = \"$(md5_of "$WORK/B/cdc/blob.bin")\" ]"
 
 # ---------- WebDAV 写支持（P2，自包含：专用用户 + 双端传播）----------
 printf 'davpass\n' | YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" adduser davuser >/dev/null 2>&1 || true

@@ -25,6 +25,9 @@ else
 fi
 json_field(){ sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -n1; }
 
+# check/wait_for 里的管道条件统一用 `grep PATTERN >/dev/null` 而非 `grep -q`：
+# 脚本开了 pipefail，grep -q 命中即退出会令上游（curl/外部命令）收到 SIGPIPE 以 141 退出，
+# 竞态条件下整个管道被判失败——响应体越大窗口越大（曾致管理页检查在 CI 间歇性失败）
 say()  { echo -e "$1"; }
 ok()   { PASS=$((PASS+1)); say "  \033[32mPASS\033[0m $1"; }
 bad()  { FAIL=$((FAIL+1)); say "  \033[31mFAIL\033[0m $1"; }
@@ -60,7 +63,7 @@ for i in $(seq 1 50); do
   curl -s "http://$SRV_ADDR/healthz" >/dev/null 2>&1 && break
   sleep 0.1
 done
-curl -s "http://$SRV_ADDR/healthz" | grep -q ok && ok "服务端启动" || { bad "服务端启动"; exit 1; }
+curl -s "http://$SRV_ADDR/healthz" | grep ok >/dev/null && ok "服务端启动" || { bad "服务端启动"; exit 1; }
 
 # ---------- 用户与两个"设备" ----------
 export YSYNC_CONFIG_DIR="$WORK/cfgA"   # 设备 A 配置目录
@@ -240,15 +243,15 @@ DAEMON_PID=$!
 wait_for "daemon 启动并写出 daemon.json" 10 "test -f $WORK/cfgA/daemon.json"
 DAEMON_TOKEN=$(json_field "$WORK/cfgA/daemon.json" token)
 check "无 token 访问被拒 (401)"  "[ \$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18731/status) = 401 ]"
-check "带 token 可读状态"        "curl -s 'http://127.0.0.1:18731/status?token=$DAEMON_TOKEN' | grep -q proj"
-check "管理页 HTML 可达"         "curl -s 'http://127.0.0.1:18731/?token=$DAEMON_TOKEN' | grep -q '管理台'"
+check "带 token 可读状态"        "curl -s 'http://127.0.0.1:18731/status?token=$DAEMON_TOKEN' | grep proj >/dev/null"
+check "管理页 HTML 可达"         "curl -s 'http://127.0.0.1:18731/?token=$DAEMON_TOKEN' | grep '管理台' >/dev/null"
 
 # ---------- M4: 只读分享（FR-H1）----------
 SHARE_TOKEN=$($YS share proj a.txt 2>/dev/null | grep -oE '/s/[0-9a-f]+' | cut -d/ -f3)
-check "分享链接可下载"         "curl -s "http://$SRV_ADDR/s/$SHARE_TOKEN" | grep -qE 'v[23]-content'"
+check "分享链接可下载"         "curl -s "http://$SRV_ADDR/s/$SHARE_TOKEN" | grep -E 'v[23]-content' >/dev/null"
 SHARE_P=$($YS share proj sub/renamed.txt -password pw123 2>/dev/null | grep -oE '/s/[0-9a-f]+' | cut -d/ -f3)
 check "密码分享无密码 401"     "[ "$(curl -s -o /dev/null -w '%{http_code}' "http://$SRV_ADDR/s/$SHARE_P")" = "401" ]"
-check "密码分享带密码 200"     "curl -s "http://$SRV_ADDR/s/$SHARE_P?p=pw123" | grep -q nested"
+check "密码分享带密码 200"     "curl -s "http://$SRV_ADDR/s/$SHARE_P?p=pw123" | grep nested >/dev/null"
 $YS unshare "$SHARE_TOKEN" >/dev/null && ok "撤销分享" || bad "撤销分享"
 
 # ---------- M4: WebDAV 只读 ----------
@@ -257,7 +260,7 @@ check "WebDAV PROPFIND 207"    "[ "$CODE" = "207" ]"
 CODE2=$(curl -s -o /dev/null -w '%{http_code}' -u alice:secret123 "http://$SRV_ADDR/dav/proj/a.txt")
 check "WebDAV GET 内容"        "[ "$CODE2" = "200" ]"
 TOKEN_A=$(json_field "$WORK/cfgA/config.json" token)
-check "浏览页可达"             "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=proj' | grep -q a.txt"
+check "浏览页可达"             "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=proj' | grep a.txt >/dev/null"
 
 # ---------- M3: backup（SR5）----------
 YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" backup -out "$WORK/backup" >/dev/null 2>&1 && ok "backup 完成" || bad "backup 完成"
@@ -278,9 +281,9 @@ case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) UIADD_DIR=$(cygpath -m "$WORK/A/uiad
 mkdir -p "$WORK/A/uiadd"
 echo "from-ui" > "$WORK/A/uiadd/hello.txt"
 ADD_R=$(api_post add "{\"local_path\":\"$UIADD_DIR\",\"name\":\"uiadd\",\"excludes\":[\"node_modules\"]}")
-check "管理台接入文件夹 (POST /add)" 'echo "$ADD_R" | grep -q ok'
+check "管理台接入文件夹 (POST /add)" 'echo "$ADD_R" | grep ok >/dev/null'
 TOKEN_A=${TOKEN_A:-$(json_field "$WORK/cfgA/config.json" token)}
-wait_for "接入后 daemon 自动上行" 15 "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=uiadd' | grep -q hello.txt"
+wait_for "接入后 daemon 自动上行" 15 "curl -s 'http://$SRV_ADDR/browse?token=$TOKEN_A&path=uiadd' | grep hello.txt >/dev/null"
 $YS_B add "$WORK/B/uiadd" --as uiadd >/dev/null
 $YS_B sync >/dev/null 2>&1
 check "B 收到 UI 接入的文件夹" "test -f "$WORK/B/uiadd/hello.txt""
@@ -292,17 +295,17 @@ wait_for "WS 触发 A 拉取（非轮询）" 25 "grep -q 'ws-change' "$WORK/A/no
 
 # 4c. 冲突处理（确定性构造）：暂停 A → 双方各改 → 恢复 → 冲突副本
 R=$(api_post pause '{"folder":"notes"}')
-check "暂停文件夹 (POST /pause)" 'echo "$R" | grep -q ok'
+check "暂停文件夹 (POST /pause)" 'echo "$R" | grep ok >/dev/null'
 sleep 1.1   # CI 文件系统时间戳粒度粗：确保 mtime 明确变化，否则引擎判"未修改"
 echo "A-local" > "$WORK/A/notes/n1.md"
 echo "B-side" > "$WORK/B/notes/n1.md"
 $YS_B sync >/dev/null 2>&1
 R=$(api_post resume '{"folder":"notes"}')
-check "恢复文件夹 (POST /resume)" 'echo "$R" | grep -q ok'
+check "恢复文件夹 (POST /resume)" 'echo "$R" | grep ok >/dev/null'
 R=$(api_post sync '{"folder":"notes"}')   # 主动触发，不等 60s 轮询（CI runner 慢）
 sleep 2
 R=$(api_post sync '{"folder":"notes"}')   # 二次触发（首个请求可能因 setup 忙略过）
-wait_for "恢复后产生冲突副本" 40 "ls "$WORK/A/notes" | grep -q 'conflict from'"
+wait_for "恢复后产生冲突副本" 40 "ls "$WORK/A/notes" | grep 'conflict from' >/dev/null"
 CINFO=$(curl -s "http://127.0.0.1:18731/conflicts?token=$DAEMON_TOKEN" | python3 -c "
 import json,sys
 c=[x for x in json.load(sys.stdin)['conflicts'] if x['folder']=='notes']
@@ -311,14 +314,14 @@ print(c[0]['rel'] + '|' + c[0]['copy_rel'])")
 check "管理台列出冲突 (GET /conflicts)" 'test -n "$CINFO"'
 CREL="${CINFO%%|*}"; CCOPY="${CINFO##*|}"
 RES_R=$(api_post resolve "{\"folder\":\"notes\",\"rel\":\"$CREL\",\"copy_rel\":\"$CCOPY\",\"choice\":\"copy\"}")
-check "管理台处理冲突: 采用副本 (POST /resolve)" 'echo "$RES_R" | grep -q ok'
-wait_for "冲突副本被清理" 20 "! ls "$WORK/A/notes" | grep -q 'conflict from'"
+check "管理台处理冲突: 采用副本 (POST /resolve)" 'echo "$RES_R" | grep ok >/dev/null'
+wait_for "冲突副本被清理" 20 "! ls "$WORK/A/notes" | grep 'conflict from' >/dev/null"
 check "原名文件已是副本内容"    "grep -q 'B-side' "$WORK/A/notes/n1.md""
 
 # 4d. 移除文件夹 + daemon 退出清理
 REM_R=$(api_post remove '{"name":"uiadd"}')
-check "管理台移除文件夹 (POST /remove)" 'echo "$REM_R" | grep -q ok'
-check "移除后状态不再包含"      "! curl -s "http://127.0.0.1:18731/status?token=$DAEMON_TOKEN" | grep -q uiadd"
+check "管理台移除文件夹 (POST /remove)" 'echo "$REM_R" | grep ok >/dev/null'
+check "移除后状态不再包含"      "! curl -s "http://127.0.0.1:18731/status?token=$DAEMON_TOKEN" | grep uiadd >/dev/null"
 kill $DAEMON_PID 2>/dev/null
 wait $DAEMON_PID 2>/dev/null
 # Windows 的 kill 是 TerminateProcess，无优雅退出路径，不能清理 daemon.json——只验证进程已终止

@@ -45,7 +45,7 @@ say "  实现: server=$(basename "$SERVER_BIN") A=$(basename "$CLIENT_A") B=$(ba
 "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 for i in $(seq 1 50); do curl -s "http://$SRV_ADDR/healthz" >/dev/null 2>&1 && break; sleep 0.1; done
-curl -s "http://$SRV_ADDR/healthz" | grep -q ok && ok "服务端启动" || { bad "服务端启动"; exit 1; }
+curl -s "http://$SRV_ADDR/healthz" | grep ok >/dev/null && ok "服务端启动" || { bad "服务端启动"; exit 1; }
 
 YSYNC_DATA="$SRV_DATA" "$SERVER_BIN" adduser alice <<<"secret123" >/dev/null 2>&1
 YS="env YSYNC_CONFIG_DIR=$WORK/cfgA $CLIENT_A"
@@ -93,7 +93,7 @@ kill -9 "$SERVER_PID" 2>/dev/null && ok "kill -9 服务端（ops 提交中）" |
 wait "$SYNC_PID" 2>/dev/null
 "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
-wait_for "服务端重启（SQLite WAL 恢复）" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
+wait_for "服务端重启（SQLite WAL 恢复）" 10 "curl -s http://$SRV_ADDR/healthz | grep ok >/dev/null"
 $YS sync >/dev/null 2>&1 && ok "服务端重启后重同步成功" || bad "服务端重启后重同步成功"
 $YS_B add "$WORK/B/many" --as many >/dev/null
 $YS_B sync >/dev/null 2>&1
@@ -155,11 +155,11 @@ check "daemon 运行时 CLI sync 静默跳过（exit 0）" "[ $RC -eq 0 ]"
 kill -9 "$SERVER_PID" 2>/dev/null; sleep 1
 "$SERVER_BIN" serve -addr "$SRV_ADDR" -data "$SRV_DATA" >>"$WORK/server.log" 2>&1 &
 SERVER_PID=$!
-wait_for "服务端重启" 10 "curl -s http://$SRV_ADDR/healthz | grep -q ok"
+wait_for "服务端重启" 10 "curl -s http://$SRV_ADDR/healthz | grep ok >/dev/null"
 mkdir -p "$WORK/A/wsdir"
 $YS add "$WORK/A/wsdir" --as wsdir >/dev/null
 api_post sync '{}'
-wait_for "daemon 热加载 CLI 新增文件夹" 15 "curl -s "http://$DAEMON_ADDR/status?token=$DAEMON_TOKEN" | grep -q wsdir"
+wait_for "daemon 热加载 CLI 新增文件夹" 15 "curl -s "http://$DAEMON_ADDR/status?token=$DAEMON_TOKEN" | grep wsdir >/dev/null"
 $YS_B add "$WORK/B/wsdir" --as wsdir >/dev/null
 echo "ws-after-restart" > "$WORK/A/wsdir/w.txt"
 $YS sync >/dev/null 2>&1
@@ -169,11 +169,11 @@ WS_F="$WORK/A/wsdir/w.txt"
 wait_for "WS 断线重连后 daemon 自动拉取" 35 'grep -q "ws-after-restart" "$WS_F"'
 # ---------- 易用性: status 汇总（daemon 存活期间） ----------
 STATUS_OUT=$($YS status 2>/dev/null)
-check "status 显示 daemon 运行摘要" 'echo "$STATUS_OUT" | grep -qE "daemon: running @ .*(个文件夹)"'
+check "status 显示 daemon 运行摘要" 'echo "$STATUS_OUT" | grep -E "daemon: running @ .*(个文件夹)" >/dev/null'
 kill "$DAEMON_PID" 2>/dev/null; wait "$DAEMON_PID" 2>/dev/null
 check "daemon 退出清理 daemon.json" "[ ! -f "$WORK/cfgA/daemon.json" ]"
 STATUS_OUT2=$($YS status 2>/dev/null)
-check "daemon 退出后 status 显示未运行" 'echo "$STATUS_OUT2" | grep -q "daemon: 未运行"'
+check "daemon 退出后 status 显示未运行" 'echo "$STATUS_OUT2" | grep "daemon: 未运行" >/dev/null'
 
 say ""
 say "== 压测结果: PASS=$PASS FAIL=$FAIL =="
