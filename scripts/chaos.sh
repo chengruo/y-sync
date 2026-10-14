@@ -36,6 +36,7 @@ if [ -n "${GITHUB_ENV:-}" ]; then
   echo "E2E_WORKDIR=$WD" >> "$GITHUB_ENV"
 fi
 export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
+say "== 混沌工作目录: $WORK =="
 pkill -9 -f y-sync-server-rs 2>/dev/null; pkill -9 -f ysyncd-rs 2>/dev/null; pkill -9 -f "ysync-server-rs serve" 2>/dev/null; sleep 0.5
 pkill -f y-sync-server-rs 2>/dev/null; sleep 0.2
 

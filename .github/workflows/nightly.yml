@@ -31,6 +31,7 @@ jobs:
           name: chaos-logs
           path: ${{ env.E2E_WORKDIR }}
           if-no-files-found: ignore
+          include-hidden-files: true
 
   e2e-matrix:
     strategy:
@@ -66,3 +67,4 @@ jobs:
           name: e2e-logs-${{ matrix.os }}
           path: ${{ env.E2E_WORKDIR }}
           if-no-files-found: ignore
+          include-hidden-files: true
