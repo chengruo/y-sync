@@ -704,7 +704,10 @@ impl Engine {
                         && srec.kind == protocol::TYPE_FILE
                         && lrec_ref.as_ref().map(|l| l.hash.clone()) != Some(srec.content_hash.clone())
                     {
-                        // 本地删除 + 服务端修改：保留服务端版本为冲突副本
+                        // 本地删除 + 服务端修改：保留服务端版本为冲突副本。
+                        // 删除必须照常上行（rel 留在 del 里）：若只在本端 state_del 而不上行
+                        // unlink，服务端节点残留、其他设备永不下删，且该路径不再进入
+                        // changed_set，三方终态永久分叉（混沌测试实测）。
                         let cc = self.conflict_copy(&rel, &srec, &mut downloads, &scan)?;
                         stats.conflicts += 1;
                         state_set.insert(
@@ -713,7 +716,6 @@ impl Engine {
                         );
                         new_files.insert(cc.clone(), srec.content_hash.clone());
                         scan.insert(cc, DiskInfo { size: srec.size, mtime: srec.mtime, is_dir: false });
-                        del.remove(&rel);
                         state_del.insert(rel.clone());
                     } else if is_del || move_src.contains(old_rel) {
                         if move_src.contains(old_rel)

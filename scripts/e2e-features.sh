@@ -336,6 +336,27 @@ check "DAV DELETE (204)" "[ \"$DEL_CODE\" = \"204\" ]"
 $YS_DAV sync >/dev/null 2>&1
 check "DAV DELETE 同步后消失" "[ ! -f \"$WORK/davA/sub/moved.txt\" ]"
 
+# ---------- 删除 vs 修改冲突：终态收敛（混沌实测分叉回归）----------
+# 场景：A 建文件 → B 修改上行 → A 本地删除后同步。
+# 期望：A 的删除上行（原名全网删除），服务端新内容以冲突副本保留，两端终态一致。
+mkdir -p "$WORK/A/dm" "$WORK/B/dm"
+echo "v1" > "$WORK/A/dm/f.txt"
+$YS add "$WORK/A/dm" --as dm >/dev/null
+$YS sync >/dev/null 2>&1
+$YS_B add "$WORK/B/dm" --as dm >/dev/null
+$YS_B sync >/dev/null 2>&1
+check "删除vs修改: B 拉到 v1" "grep -q v1 \"$WORK/B/dm/f.txt\""
+echo "v2-b" > "$WORK/B/dm/f.txt"
+$YS_B sync >/dev/null 2>&1
+rm "$WORK/A/dm/f.txt"
+$YS sync 2>"$WORK/dm-debug.log"
+check "删除vs修改: A 副本保留服务端新内容" "grep -q v2-b \"$WORK/A/dm/f (conflict from devMain).txt\""
+check "删除vs修改: A 原名保持删除" "[ ! -f \"$WORK/A/dm/f.txt\" ]"
+$YS_B sync >/dev/null 2>&1
+check "删除vs修改: B 跟随删除原名" "[ ! -f \"$WORK/B/dm/f.txt\" ]"
+check "删除vs修改: B 收到冲突副本" "grep -q v2-b \"$WORK/B/dm/f (conflict from devMain).txt\""
+check "删除vs修改: 两端终态一致" "[ \"\$(ls "$WORK/A/dm" | sort)\" = \"\$(ls "$WORK/B/dm" | sort)\" ]"
+
 say ""
 say "== 特性验证结果: PASS=$PASS FAIL=$FAIL =="
 [ $FAIL -eq 0 ]
