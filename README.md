@@ -48,15 +48,19 @@
 
 ### 1. macOS 快速安装
 
-#### 方式 A：官方脚本一键安装 CLI（推荐）
-自动识别 Apple Silicon（M 系列）或 Intel 芯片架构，从 GitHub Release 获取最新构建并配置：
+#### 方式 A：官方脚本一键安装与升级（推荐）
+自动识别系统架构（Apple Silicon / Intel），从 GitHub Release 获取最新构建并覆盖安装，已有数据与配置完整保留：
 ```bash
-# 默认安装客户端命令行到 /usr/local/bin
-curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | sh -s client
+# 一键安装/升级客户端命令行（若本地已有 /Applications/y-sync.app 也会自动联动更新桌面端）
+curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | bash -s client
 
-# Apple Silicon 用户若偏好 Homebrew 路径（/opt/homebrew/bin）：
-PREFIX=/opt/homebrew curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | sh -s client
+# 仅安装/更新 macOS 桌面端应用（/Applications/y-sync.app）
+curl -fsSL https://raw.githubusercontent.com/chengruo/y-sync/main/scripts/install.sh | bash -s desktop
 ```
+> **自动优化特性**：
+> - **路径自适应**：在 Apple Silicon Mac 上自动优先识别 `/opt/homebrew/bin`（存在时），解决 `/usr/local/bin` 被 PATH 优先级遮蔽的问题。
+> - **桌面应用智能联动**：检测到系统中存在 `/Applications/y-sync.app` 时，会自动一并下载最新 DMG 替换，无需手动拖拽。
+> - **无缝生效**：自动退出内存中的旧进程并自动移除 Gatekeeper 隔离标记，更新后立即生效。
 
 #### 方式 B：从源码编译安装（包含最新 macOS 原生控制中心桌面应用 + CLI）
 在仓库根目录直接执行：
