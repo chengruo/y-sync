@@ -340,8 +340,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running y-sync desktop")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 let _ = show_manager(app);
             }
+            let _ = (app, &event);
         });
 }

@@ -434,7 +434,13 @@ impl Engine {
             let mut after_id = 0i64;
             loop {
                 let (page, has_more) = self.with_api(|a| a.nodes_paged(after_id, 5000))?;
+                if page.is_empty() {
+                    break;
+                }
                 for n in page {
+                    // 分页游标必须无条件推进：页内全是其他文件夹的节点时，
+                    // 若游标只在本子树节点上前进，after_id 会停滞导致同一页被无限重拉
+                    after_id = n.id.max(after_id);
                     if n.path != f.name && !n.path.starts_with(&prefix) {
                         continue;
                     }
@@ -442,7 +448,6 @@ impl Engine {
                     if rel.is_empty() || rel == f.name {
                         continue; // 根节点本身不属于子树内容（避免泄漏出杂散目录）
                     }
-                    after_id = n.id.max(after_id);
                     changed_set.insert(rel.clone());
                     server_now.insert(rel, n);
                 }
