@@ -39,8 +39,9 @@ fn main() {
         "revoke" => cmd_revoke(&args[1..]),
         "remove" => cmd_remove(&args[1..]),
         "ui" => cmd_ui(),
-        "version" => {
-            println!("ysyncd v0.1.0 (Rust 客户端, 协议 v1 兼容)");
+        "-v" | "--version" | "version" => {
+            let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
+            println!("ysync v{build} (Rust 客户端, 协议 v1 兼容)");
             Ok(())
         }
         _ => {

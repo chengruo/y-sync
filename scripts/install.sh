@@ -7,8 +7,6 @@ set -eu
 
 REPO="chengruo/y-sync"
 MODE="${1:-both}"
-PREFIX="${PREFIX:-/usr/local}"
-
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -16,6 +14,15 @@ case "$ARCH" in
   aarch64|arm64) A="arm64" ;;
   *) echo "不支持的架构: $ARCH"; exit 1 ;;
 esac
+
+# 路径自适应：若未显式指定 PREFIX，macOS 环境下若已存在 /opt/homebrew/bin（Apple Silicon 默认），优先安装到 /opt/homebrew
+if [ -z "${PREFIX:-}" ]; then
+  if [ "$OS" = "Darwin" ] && [ -d "/opt/homebrew/bin" ]; then
+    PREFIX="/opt/homebrew"
+  else
+    PREFIX="/usr/local"
+  fi
+fi
 
 echo "==> 查询最新版本..."
 TAG="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
