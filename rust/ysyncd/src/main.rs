@@ -156,6 +156,9 @@ fn cmd_init(args: &[String]) -> Result<()> {
     let pw = read_password();
     let resp = api::Api::login(&user, &pw, &device, &server)?;
     let mut cfg = ysync_core::load_config().unwrap_or_default();
+    if cfg.user != user {
+        cfg.folders.clear();
+    }
     cfg.server_url = server.trim_end_matches('/').to_string();
     cfg.user = user;
     cfg.token = resp.token;

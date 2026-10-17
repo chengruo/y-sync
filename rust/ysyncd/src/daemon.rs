@@ -160,6 +160,9 @@ impl Daemon {
             device_name.to_string()
         };
         ctx::with_cfg(|c| {
+            if c.user != user {
+                c.folders.clear();
+            }
             c.server_url = server_url;
             c.user = user.to_string();
             c.token = resp.token.clone();
