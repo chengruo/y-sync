@@ -147,7 +147,7 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
             let _ = w.set_focus();
             return Ok(());
         }
-        WebviewWindowBuilder::new(
+        let w = WebviewWindowBuilder::new(
             app,
             "manager",
             WebviewUrl::App("offline.html".into()),
@@ -156,6 +156,13 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(720.0, 480.0)
         .min_inner_size(600.0, 400.0)
         .build()?;
+        let w_clone = w.clone();
+        w.on_window_event(move |event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = w_clone.hide();
+            }
+        });
         return Ok(());
     };
     let url = manager_url(&d)
@@ -168,11 +175,18 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
         let _ = w.set_focus();
         return Ok(());
     }
-    WebviewWindowBuilder::new(app, "manager", WebviewUrl::External(url))
+    let w = WebviewWindowBuilder::new(app, "manager", WebviewUrl::External(url))
         .title("y-sync 控制中心")
         .inner_size(1000.0, 680.0)
         .min_inner_size(840.0, 560.0)
         .build()?;
+    let w_clone = w.clone();
+    w.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = w_clone.hide();
+        }
+    });
 
     Ok(())
 }
@@ -188,10 +202,15 @@ fn main() {
             None,
         ))
         .setup(|app| {
-            // 托盘应用：不占 Dock（macOS）——先于 handle 借用
+            // 常驻客户端应用：Dock 栏常驻图标与 Cmd+Tab 支持（macOS）
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
             let handle = app.handle();
+            let handle_for_launch = handle.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(200));
+                let _ = show_manager(&handle_for_launch);
+            });
 
             let open_i = MenuItem::with_id(handle, "open", "打开管理台", true, None::<&str>)?;
             let sync_i = MenuItem::with_id(handle, "sync", "立即全部同步", true, None::<&str>)?;
@@ -318,6 +337,11 @@ fn main() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running y-sync desktop");
+        .build(tauri::generate_context!())
+        .expect("error while running y-sync desktop")
+        .run(|app, event| {
+            if let tauri::RunEvent::Reopen { .. } = event {
+                let _ = show_manager(app);
+            }
+        });
 }
