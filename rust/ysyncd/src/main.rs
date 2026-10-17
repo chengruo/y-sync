@@ -155,14 +155,12 @@ fn cmd_init(args: &[String]) -> Result<()> {
     std::io::stdout().flush().ok();
     let pw = read_password();
     let resp = api::Api::login(&user, &pw, &device, &server)?;
-    let mut cfg = ysync_core::Config {
-        server_url: server.trim_end_matches('/').to_string(),
-        user,
-        token: resp.token,
-        device_name: device,
-        device_id: resp.device_id,
-        ..Default::default()
-    };
+    let mut cfg = ysync_core::load_config().unwrap_or_default();
+    cfg.server_url = server.trim_end_matches('/').to_string();
+    cfg.user = user;
+    cfg.token = resp.token;
+    cfg.device_name = device;
+    cfg.device_id = resp.device_id;
     cfg.defaults();
     ysync_core::save_config(&cfg)?;
     println!("已登录为 {}（设备 {}）", cfg.user, cfg.device_name);

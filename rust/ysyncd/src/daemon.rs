@@ -160,14 +160,11 @@ impl Daemon {
             device_name.to_string()
         };
         ctx::with_cfg(|c| {
-            *c = ysync_core::Config {
-                server_url,
-                user: user.to_string(),
-                token: resp.token.clone(),
-                device_name: device_name.clone(),
-                device_id: resp.device_id,
-                ..Default::default()
-            };
+            c.server_url = server_url;
+            c.user = user.to_string();
+            c.token = resp.token.clone();
+            c.device_name = device_name.clone();
+            c.device_id = resp.device_id;
             c.defaults(); // 防 chunk_size=0 除零（P1 修复）
         });
         if let Err(e) = ctx::save_result() {

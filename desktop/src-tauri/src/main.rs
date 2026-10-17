@@ -154,6 +154,7 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
         )
         .title("y-sync daemon 未运行")
         .inner_size(720.0, 480.0)
+        .min_inner_size(600.0, 400.0)
         .build()?;
         return Ok(());
     };
@@ -168,9 +169,11 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
         return Ok(());
     }
     WebviewWindowBuilder::new(app, "manager", WebviewUrl::External(url))
-        .title("y-sync 管理台")
-        .inner_size(920.0, 680.0)
+        .title("y-sync 控制中心")
+        .inner_size(1000.0, 680.0)
+        .min_inner_size(840.0, 560.0)
         .build()?;
+
     Ok(())
 }
 

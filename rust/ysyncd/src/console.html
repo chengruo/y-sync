@@ -1,0 +1,1914 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>y-sync 控制台</title>
+<style>
+/* ── macOS Human Interface Guidelines (HIG) 基础设计系统 ── */
+:root {
+  --bg-app: #f5f5f7;
+  --bg-sidebar: rgba(238, 238, 242, 0.78);
+  --bg-content: #ffffff;
+  --bg-card: #ffffff;
+  --bg-card-hover: #fbfbfd;
+  --bg-input: rgba(0, 0, 0, 0.04);
+  --bg-input-focus: #ffffff;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-subtle: rgba(0, 0, 0, 0.04);
+  --text-main: #1d1d1f;
+  --text-secondary: #6e6e73;
+  --text-tertiary: #86868b;
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-soft: rgba(0, 113, 227, 0.10);
+  --accent-text: #ffffff;
+  --ok: #34c759;
+  --ok-soft: rgba(52, 199, 89, 0.12);
+  --warn: #ff9500;
+  --warn-soft: rgba(255, 149, 0, 0.12);
+  --err: #ff3b30;
+  --err-soft: rgba(255, 59, 48, 0.12);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 12px 34px rgba(0, 0, 0, 0.10);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 9999px;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg-app: #18181b;
+    --bg-sidebar: rgba(30, 30, 34, 0.78);
+    --bg-content: #1e1e22;
+    --bg-card: #252529;
+    --bg-card-hover: #2c2c31;
+    --bg-input: rgba(255, 255, 255, 0.08);
+    --bg-input-focus: #2c2c31;
+    --border: rgba(255, 255, 255, 0.10);
+    --border-subtle: rgba(255, 255, 255, 0.05);
+    --text-main: #f5f5f7;
+    --text-secondary: #a1a1a6;
+    --text-tertiary: #6e6e73;
+    --accent: #0a84ff;
+    --accent-hover: #409cff;
+    --accent-soft: rgba(10, 132, 255, 0.18);
+    --ok: #30d158;
+    --ok-soft: rgba(48, 209, 88, 0.18);
+    --warn: #ff9f0a;
+    --warn-soft: rgba(255, 159, 10, 0.18);
+    --err: #ff453a;
+    --err-soft: rgba(255, 69, 58, 0.18);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+    --shadow-lg: 0 14px 40px rgba(0, 0, 0, 0.6);
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-app);
+  color: var(--text-main);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+/* ── 顶部 macOS 风格标题栏 ── */
+.top-bar {
+  height: 52px;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+.brand-area {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.app-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+  flex-shrink: 0;
+}
+.app-info h1 {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+}
+.app-info .sub {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  font-size: 11.5px;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+}
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+.conn-pill.ok { color: var(--ok); border-color: var(--ok-soft); }
+.conn-pill.ok .conn-dot { background: var(--ok); box-shadow: 0 0 0 2px var(--ok-soft); }
+.conn-pill.warn { color: var(--warn); border-color: var(--warn-soft); }
+.conn-pill.warn .conn-dot { background: var(--warn); box-shadow: 0 0 0 2px var(--warn-soft); }
+.conn-pill.err { color: var(--err); border-color: var(--err-soft); }
+.conn-pill.err .conn-dot { background: var(--err); box-shadow: 0 0 0 2px var(--err-soft); }
+
+/* ── 按钮样式 ── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 13px;
+  font-size: 12.5px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-main);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  outline: none;
+  font-family: inherit;
+}
+.btn:hover { background: var(--bg-card-hover); border-color: var(--text-tertiary); }
+.btn:active { transform: scale(0.98); }
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: transparent;
+  box-shadow: 0 1px 3px rgba(0, 113, 227, 0.25);
+}
+.btn-primary:hover { background: var(--accent-hover); color: #ffffff; border-color: transparent; }
+.btn-sm { padding: 4px 9px; font-size: 11.5px; border-radius: var(--radius-sm); }
+.btn-danger { color: var(--err); }
+.btn-danger:hover { background: var(--err-soft); border-color: var(--err); }
+.btn-icon { width: 28px; height: 28px; padding: 0; border-radius: var(--radius-sm); }
+
+/* ── 主体 SplitView 布局 ── */
+.app-body {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── 左侧边栏 (Sidebar) ── */
+.sidebar {
+  width: 230px;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 12px 10px;
+  flex-shrink: 0;
+}
+.sidebar-search {
+  position: relative;
+  margin-bottom: 12px;
+}
+.sidebar-search input {
+  width: 100%;
+  padding: 6px 10px 6px 28px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-main);
+  font-size: 12px;
+  outline: none;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.sidebar-search input:focus {
+  background: var(--bg-input-focus);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.sidebar-search svg {
+  position: absolute;
+  left: 8px;
+  top: 7px;
+  width: 13px;
+  height: 13px;
+  color: var(--text-tertiary);
+}
+.sidebar-group {
+  margin-bottom: 14px;
+}
+.sidebar-group-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--text-tertiary);
+  padding: 4px 8px;
+  margin-bottom: 2px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 9px;
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-main);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: all 0.12s;
+  text-align: left;
+}
+.nav-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+@media (prefers-color-scheme: dark) {
+  .nav-item:hover { background: rgba(255, 255, 255, 0.07); }
+}
+.nav-item.active {
+  background: var(--accent);
+  color: #ffffff;
+}
+.nav-item.active .nav-icon {
+  color: #ffffff;
+}
+.nav-item.active .nav-badge {
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+}
+.nav-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.nav-icon {
+  width: 16px;
+  height: 16px;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.nav-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-secondary);
+}
+@media (prefers-color-scheme: dark) {
+  .nav-badge { background: rgba(255, 255, 255, 0.12); color: var(--text-secondary); }
+}
+.nav-badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.nav-item.active .nav-badge.warn {
+  background: #ffffff;
+  color: var(--warn);
+}
+
+/* 侧边栏底部存储与用量小组件 */
+.sidebar-storage {
+  padding: 11px;
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+.storage-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.storage-bar {
+  height: 6px;
+  background: var(--bg-input);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+.storage-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #0071e3, #38bdf8);
+  border-radius: var(--radius-pill);
+  transition: width 0.4s ease;
+}
+.storage-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+/* ── 右侧主工作区 (Content) ── */
+.content-pane {
+  flex: 1;
+  background: var(--bg-content);
+  overflow-y: auto;
+  padding: 24px 28px 60px;
+  display: flex;
+  flex-direction: column;
+}
+.section-view {
+  display: none;
+  animation: fadeIn 0.18s ease forwards;
+}
+.section-view.active {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.pane-title h2 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+}
+.pane-title p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 3px;
+}
+
+/* ── 卡片与列表容器 ── */
+.card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.item-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-sm);
+  transition: all 0.15s ease;
+}
+.item-card:hover {
+  border-color: rgba(0, 113, 227, 0.3);
+  box-shadow: var(--shadow-md);
+}
+.item-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+.item-card-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.folder-mac-icon {
+  width: 38px;
+  height: 38px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.folder-mac-icon svg { width: 22px; height: 22px; }
+.item-details {
+  flex: 1;
+  min-width: 0;
+}
+.item-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.item-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
+}
+.item-path {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  margin-top: 3px;
+  word-break: break-all;
+  user-select: text;
+}
+.link-btn {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-sans);
+  font-weight: 500;
+}
+.link-btn:hover { text-decoration: underline; }
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.item-card-meta {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+}
+.meta-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pill-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+}
+.pill-badge.ok { background: var(--ok-soft); color: var(--ok); }
+.pill-badge.warn { background: var(--warn-soft); color: var(--warn); }
+.pill-badge.err { background: var(--err-soft); color: var(--err); }
+.pill-badge.accent { background: var(--accent-soft); color: var(--accent); }
+
+/* ── 冲突比对卡片 ── */
+.conflict-card {
+  border: 1px solid rgba(255, 149, 0, 0.35);
+  background: var(--bg-card);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  margin-bottom: 14px;
+}
+.conflict-header {
+  background: var(--warn-soft);
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-main);
+  border-bottom: 1px solid rgba(255, 149, 0, 0.2);
+}
+.conflict-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 16px;
+  gap: 16px;
+}
+@media (max-width: 680px) {
+  .conflict-grid { grid-template-columns: 1fr; }
+}
+.conflict-side {
+  padding: 12px;
+  background: var(--bg-app);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+.conflict-side h4 {
+  font-size: 12px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.conflict-side .desc {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
+
+/* ── 时光机版本时间轴 ── */
+.version-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  margin-bottom: 16px;
+}
+.version-timeline {
+  border-left: 2px solid var(--accent-soft);
+  margin-left: 18px;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.timeline-node {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.timeline-dot {
+  position: absolute;
+  left: -25px;
+  top: 14px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ── 空态展示 ── */
+.empty-view {
+  text-align: center;
+  padding: 50px 20px;
+  color: var(--text-tertiary);
+}
+.empty-icon {
+  font-size: 36px;
+  margin-bottom: 10px;
+  display: block;
+}
+.empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.empty-desc {
+  font-size: 12px;
+}
+
+/* ── 拖拽接入区域 ── */
+.drop-zone {
+  margin-top: 16px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.drop-zone:hover, .drop-zone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.drop-zone svg {
+  width: 32px;
+  height: 32px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.drop-zone h3 {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+.drop-zone p {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* ── 拟态模态弹窗 (Modal) ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  z-index: 100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.show { display: flex; }
+.modal-window {
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: modalIn 0.16s ease forwards;
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.modal-header h3 {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.modal-close-btn {
+  background: none;
+  border: none;
+  font-size: 16px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  line-height: 1;
+}
+.modal-body {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.form-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+.form-field input, .form-field select {
+  padding: 7px 11px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-main);
+  font-size: 12.5px;
+  outline: none;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+.form-field input:focus, .form-field select:focus {
+  background: var(--bg-input-focus);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.form-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-app);
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* ── 浮动 Toast 消息 ── */
+#toast-msg {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-12px);
+  opacity: 0;
+  pointer-events: none;
+  background: var(--text-main);
+  color: var(--bg-content);
+  padding: 8px 18px;
+  border-radius: var(--radius-pill);
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: var(--shadow-md);
+  transition: all 0.22s ease;
+  z-index: 200;
+}
+#toast-msg.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+#toast-msg.ok { background: var(--ok); color: #ffffff; }
+#toast-msg.err { background: var(--err); color: #ffffff; }
+
+/* ── 初始配置卡片 (Setup Hero) ── */
+#setup-screen {
+  max-width: 500px;
+  margin: 30px auto;
+  padding: 28px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+#setup-screen h2 {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+#setup-screen p {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  margin-bottom: 20px;
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+
+<!-- 顶部工具栏 -->
+<header class="top-bar">
+  <div class="brand-area">
+    <svg class="app-logo" viewBox="0 0 48 48" aria-hidden="true">
+      <defs>
+        <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#0071e3"/>
+          <stop offset="100%" stop-color="#38bdf8"/>
+        </linearGradient>
+      </defs>
+      <rect width="48" height="48" rx="12" fill="url(#lg)"/>
+      <g stroke="#ffffff" stroke-width="3.5" fill="none" stroke-linecap="round">
+        <path d="M 15.2 20.4 A 10 10 0 0 1 31.9 17.9"/>
+        <path d="M 32.8 27.6 A 10 10 0 0 1 16.1 30.1"/>
+      </g>
+      <polygon points="34.9,22.6 33.2,15.9 28.9,19.9" fill="#ffffff"/>
+      <polygon points="13.1,25.4 14.8,32.1 19.1,28.1" fill="#ffffff"/>
+    </svg>
+    <div class="app-info">
+      <h1>y-sync 控制中心</h1>
+      <span class="sub">轻量文件同步 · 本机控制台</span>
+    </div>
+  </div>
+
+  <div class="top-actions">
+    <div class="conn-pill" id="conn-pill">
+      <span class="conn-dot"></span>
+      <span id="conn-text">连接中…</span>
+    </div>
+
+    <button class="btn btn-sm" onclick="syncAll()" title="立即触发所有文件夹对账增量同步">
+      <svg id="sync-spin-icon" style="width:13px;height:13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      <span>全部同步</span>
+    </button>
+
+    <button class="btn btn-primary btn-sm" onclick="openAddFolderModal()">
+      <svg style="width:13px;height:13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+      <span>添加文件夹</span>
+    </button>
+  </div>
+</header>
+
+<!-- Toast 提示 -->
+<div id="toast-msg"></div>
+
+<!-- 主窗口主体 -->
+<div class="app-body">
+  
+  <!-- 左侧 macOS NavigationSplitView 侧边栏 -->
+  <aside class="sidebar">
+    <div>
+      <div class="sidebar-search">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+        <input type="text" id="quick-filter-input" placeholder="快速筛选…" oninput="onFilterChange(this.value)">
+      </div>
+
+      <div class="sidebar-group">
+        <div class="sidebar-group-title">核心同步</div>
+        <button class="nav-item active" onclick="switchSection('folders')" id="nav-btn-folders">
+          <span class="nav-left">
+            <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+            <span>同步文件夹</span>
+          </span>
+          <span class="nav-badge" id="badge-folders">0</span>
+        </button>
+
+        <button class="nav-item" onclick="switchSection('conflicts')" id="nav-btn-conflicts">
+          <span class="nav-left">
+            <svg class="nav-icon" style="color:var(--warn)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+            <span>待处理冲突</span>
+          </span>
+          <span class="nav-badge warn" id="badge-conflicts">0</span>
+        </button>
+
+        <button class="nav-item" onclick="switchSection('versions')" id="nav-btn-versions">
+          <span class="nav-left">
+            <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+            <span>版本时光机</span>
+          </span>
+        </button>
+
+        <button class="nav-item" onclick="switchSection('trash')" id="nav-btn-trash">
+          <span class="nav-left">
+            <svg class="nav-icon" style="color:var(--err)" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            <span>服务端回收站</span>
+          </span>
+          <span class="nav-badge" id="badge-trash">0</span>
+        </button>
+      </div>
+
+      <div class="sidebar-group">
+        <div class="sidebar-group-title">协作与设备</div>
+        <button class="nav-item" onclick="switchSection('shares')" id="nav-btn-shares">
+          <span class="nav-left">
+            <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z"/></svg>
+            <span>外链分享</span>
+          </span>
+          <span class="nav-badge" id="badge-shares">0</span>
+        </button>
+
+        <button class="nav-item" onclick="switchSection('devices')" id="nav-btn-devices">
+          <span class="nav-left">
+            <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+            <span>已连接设备</span>
+          </span>
+          <span class="nav-badge" id="badge-devices">0</span>
+        </button>
+
+        <button class="nav-item" onclick="switchSection('audit')" id="nav-btn-audit">
+          <span class="nav-left">
+            <svg class="nav-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+            <span>活动记录</span>
+          </span>
+        </button>
+      </div>
+    </div>
+
+    <!-- 侧栏底部：云端用量 -->
+    <div class="sidebar-storage">
+      <div class="storage-header">
+        <span>云端存储</span>
+        <span id="storage-text-num" style="font-family:var(--font-mono);font-size:11px;">0 B / 不限</span>
+      </div>
+      <div class="storage-bar">
+        <div class="storage-bar-fill" id="storage-fill" style="width: 0%;"></div>
+      </div>
+      <div class="storage-footer">
+        <span id="storage-user">alice</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span id="storage-pct">0%</span>
+          <button class="link-btn" onclick="openReauthModal()" title="更新登录凭据或密码">重新登录</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- 右侧内容主视区 -->
+  <main class="content-pane" id="main-content-pane">
+    
+    <!-- 初始配置界面 (未初始化时展示) -->
+    <section id="setup-screen" style="display:none;">
+      <h2>初始配置</h2>
+      <p>首次运行 y-sync：填写服务端地址与账号凭据，保存后即可开启自动多文件夹独立游标同步。</p>
+      <div class="modal-body" style="padding:0;">
+        <div class="form-field">
+          <label>服务端地址</label>
+          <input type="text" id="s-url" placeholder="https://sync.example.com/y-sync">
+        </div>
+        <div class="form-field-row">
+          <div class="form-field">
+            <label>用户名</label>
+            <input type="text" id="s-user" placeholder="alice">
+          </div>
+          <div class="form-field">
+            <label>密码</label>
+            <input type="password" id="s-pass" placeholder="••••••••">
+          </div>
+        </div>
+        <div class="form-field">
+          <label>设备名称</label>
+          <input type="text" id="s-dev" placeholder="例如：MacBook Pro">
+        </div>
+        <button class="btn btn-primary" onclick="doSetup()" style="margin-top:10px;padding:9px 18px;">连接并保存</button>
+      </div>
+    </section>
+
+    <!-- SECTION 1: 同步文件夹 (Folders) -->
+    <section class="section-view active" id="sec-folders">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>同步文件夹</h2>
+          <p>多文件夹独立游标增量对账，支持直接在 macOS 访达中查看</p>
+        </div>
+        <button class="btn btn-sm" onclick="openAddFolderModal()">+ 接入新文件夹</button>
+      </div>
+
+      <!-- 401 凭证失效警报横幅 -->
+      <div id="auth-warning-banner" style="display:none;margin-bottom:16px;padding:12px 16px;border-radius:var(--radius-md);background:var(--err-soft);border:1px solid var(--err);box-shadow:var(--shadow-sm);">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span style="font-size:20px;">⚠️</span>
+            <div>
+              <div style="font-size:13px;font-weight:600;color:var(--err);">服务端登录凭据已失效 (401 Unauthorized)</div>
+              <div style="font-size:11.5px;color:var(--text-secondary);margin-top:2px;">密码可能已被重置或设备授权已吊销。更新密码后将自动恢复增量同步。</div>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="openReauthModal()">更新密码与凭据</button>
+        </div>
+      </div>
+
+      <div class="card-list" id="folders-card-list"></div>
+
+      <!-- 拖拽与快捷选择接入区域 -->
+      <div class="drop-zone" id="drop-zone-folder" onclick="openAddFolderModal()">
+        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+        <h3>拖拽文件夹至此处快速接入</h3>
+        <p>或点击此处选择本地目录，支持 .gitignore 规则继承与自定义排除</p>
+      </div>
+    </section>
+
+    <!-- SECTION 2: 待处理冲突 (Conflicts) -->
+    <section class="section-view" id="sec-conflicts">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>待处理冲突</h2>
+          <p>离线双向修改时自动生成保护副本，在此进行双栏决策，决策结果将自动传播</p>
+        </div>
+      </div>
+      <div id="conflicts-container"></div>
+    </section>
+
+    <!-- SECTION 3: 版本时光机 (Versions) -->
+    <section class="section-view" id="sec-versions">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>版本时光机</h2>
+          <p>覆盖前自动记录历史版本，支持查看任意历史快照并一键回滚回写</p>
+        </div>
+      </div>
+
+      <div class="version-search-bar">
+        <select id="v-folder" style="padding:6px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input);color:var(--text-main);font-size:12px;outline:none;">
+          <option value="">选择文件夹…</option>
+        </select>
+        <input type="text" id="v-rel" placeholder="输入文件相对路径，如 src/main.rs" style="flex:1;padding:6px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input);color:var(--text-main);font-size:12px;outline:none;font-family:var(--font-mono);">
+        <button class="btn btn-primary btn-sm" onclick="loadVersions()">查询时间线</button>
+      </div>
+
+      <div class="version-timeline" id="version-timeline-box">
+        <div class="empty-view">
+          <span class="empty-icon">⏳</span>
+          <div class="empty-title">在上方输入文件路径查询历史快照</div>
+          <div class="empty-desc">支持秒级查看每次远程覆盖前的内容快照</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 4: 服务端回收站 (Trash) -->
+    <section class="section-view" id="sec-trash">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>服务端回收站</h2>
+          <p>删除操作先行进入回收站保护（默认保留 30 天，到期自动清理）</p>
+        </div>
+      </div>
+      <div class="card-list" id="trash-card-list"></div>
+    </section>
+
+    <!-- SECTION 5: 外链分享 (Shares) -->
+    <section class="section-view" id="sec-shares">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>公开分享链接</h2>
+          <p>生成外部只读下载链接（支持密码保护与限时自动失效）</p>
+        </div>
+      </div>
+
+      <!-- 创建分享行 -->
+      <div class="item-card" style="margin-bottom:16px;">
+        <h3 style="font-size:13px;font-weight:600;margin-bottom:12px;">创建新的分享链接</h3>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+          <select id="sh-folder" style="padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input);color:var(--text-main);font-size:12px;outline:none;width:140px;">
+            <option value="">选择文件夹</option>
+          </select>
+          <input type="text" id="sh-rel" placeholder="相对路径，如 docs" style="flex:1;min-width:140px;padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input);color:var(--text-main);font-size:12px;outline:none;font-family:var(--font-mono);">
+          <input type="number" id="sh-hours" placeholder="有效小时(0=永久)" style="width:130px;padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input);color:var(--text-main);font-size:12px;outline:none;">
+          <input type="text" id="sh-pass" placeholder="提取密码(可空)" style="width:120px;padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input);color:var(--text-main);font-size:12px;outline:none;">
+          <button class="btn btn-primary btn-sm" onclick="createShare()">生成分享</button>
+        </div>
+      </div>
+
+      <div class="card-list" id="shares-card-list"></div>
+    </section>
+
+    <!-- SECTION 6: 已连接设备 (Devices) -->
+    <section class="section-view" id="sec-devices">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>授权设备列表</h2>
+          <p>每台设备持有独立令牌，可随时远程撤销其同步访问权限</p>
+        </div>
+      </div>
+      <div class="card-list" id="devices-card-list"></div>
+    </section>
+
+    <!-- SECTION 7: 活动日志 (Audit) -->
+    <section class="section-view" id="sec-audit">
+      <div class="pane-header">
+        <div class="pane-title">
+          <h2>最近活动记录</h2>
+          <p>实时审计同步事件流，便于排查与追溯</p>
+        </div>
+      </div>
+      <div class="card-list" id="audit-card-list"></div>
+    </section>
+
+  </main>
+</div>
+
+<!-- 模态弹窗：接入新文件夹 -->
+<div class="modal-overlay" id="add-modal">
+  <div class="modal-window">
+    <div class="modal-header">
+      <h3>接入新同步文件夹</h3>
+      <button class="modal-close-btn" onclick="closeAddFolderModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-field">
+        <label>本地目录绝对路径</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="f-path" placeholder="/Users/me/Documents/my-project" style="flex:1;font-family:var(--font-mono);">
+          <button class="btn btn-sm" onclick="triggerNativeFolderPicker()">
+            <svg style="width:13px;height:13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+            <span>浏览…</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="form-field">
+        <label>同步标识名称 (默认取目录名)</label>
+        <input type="text" id="f-name" placeholder="my-project">
+      </div>
+
+      <div class="form-field">
+        <label>排除规则 (逗号分隔)</label>
+        <input type="text" id="f-ex" value="node_modules, dist, target, .DS_Store" style="font-family:var(--font-mono);">
+      </div>
+
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+        <input type="checkbox" id="f-gi" checked style="accent-color:var(--accent);width:15px;height:15px;cursor:pointer;">
+        <label for="f-gi" style="font-size:12px;font-weight:500;cursor:pointer;">同时沿用该目录下的 .gitignore 过滤规则</label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" onclick="closeAddFolderModal()">取消</button>
+      <button class="btn btn-primary btn-sm" onclick="addFolder()">接入并开始同步</button>
+    </div>
+  </div>
+</div>
+
+<!-- 模态弹窗：更新凭证 / 重新登录 -->
+<div class="modal-overlay" id="reauth-modal">
+  <div class="modal-window">
+    <div class="modal-header">
+      <h3>更新服务端登录凭据</h3>
+      <button class="modal-close-btn" onclick="closeReauthModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:12px;color:var(--text-secondary);line-height:1.6;">
+        当服务端密码修改或 Token 失效导致 401 错误时，在此输入新密码重新登录，将自动更新本地凭据并恢复同步（保留当前所有已接入文件夹）。
+      </div>
+      <div class="form-field">
+        <label>服务端地址</label>
+        <input type="text" id="reauth-url" placeholder="https://sync.example.com/y-sync" style="font-family:var(--font-mono);">
+      </div>
+      <div class="form-field-row">
+        <div class="form-field">
+          <label>用户名</label>
+          <input type="text" id="reauth-user" placeholder="alice">
+        </div>
+        <div class="form-field">
+          <label>新密码</label>
+          <input type="password" id="reauth-pass" placeholder="输入新密码">
+        </div>
+      </div>
+      <div class="form-field">
+        <label>设备名称</label>
+        <input type="text" id="reauth-dev" placeholder="默认保持当前设备名">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" onclick="closeReauthModal()">取消</button>
+      <button class="btn btn-primary btn-sm" onclick="doReauth()">更新凭据并同步</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Token 处理
+let TOKEN = new URLSearchParams(location.search).get("token") || __TOKEN__;
+if (location.search.includes("token=")) {
+  history.replaceState(null, "", location.pathname);
+}
+const H = () => ({ "Content-Type": "application/json", "X-Ysync-Token": TOKEN });
+const F = (p, opt) => fetch(p, Object.assign({}, opt || {}, { headers: { "X-Ysync-Token": TOKEN } }));
+
+let SERVER_BASE = "";
+let CURRENT_USER = "";
+let CURRENT_DEVICE_NAME = "";
+let CURRENT_FOLDERS = [];
+let ACTIVE_SECTION = "folders";
+let FILTER_KEYWORD = "";
+
+// 格式化函数
+function fmtBytes(n) {
+  if (!n && n !== 0) return "-";
+  const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return (i ? v.toFixed(1) : v) + " " + u[i];
+}
+function fmtTime(sec) {
+  return sec > 0 ? new Date(sec * 1000).toLocaleString() : "-";
+}
+function esc(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+}
+
+let toastTimer;
+function msg(text, type) {
+  const el = document.getElementById("toast-msg");
+  el.textContent = text;
+  el.className = "show " + (type || "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = ""; }, 3500);
+}
+
+function setConn(cls, text) {
+  const el = document.getElementById("conn-pill");
+  el.className = "conn-pill " + cls;
+  document.getElementById("conn-text").textContent = text;
+}
+
+// 侧边栏切换
+function switchSection(sec) {
+  ACTIVE_SECTION = sec;
+  document.querySelectorAll(".section-view").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".nav-item").forEach(el => el.classList.remove("active"));
+  
+  const targetSec = document.getElementById("sec-" + sec);
+  if (targetSec) targetSec.classList.add("active");
+  
+  const targetNav = document.getElementById("nav-btn-" + sec);
+  if (targetNav) targetNav.classList.add("active");
+}
+
+function onFilterChange(val) {
+  FILTER_KEYWORD = val.trim().toLowerCase();
+  renderFolders(CURRENT_FOLDERS);
+}
+
+// 在访达中打开
+async function revealPath(path) {
+  try {
+    const r = await F("/reveal", {
+      method: "POST",
+      headers: H(),
+      body: JSON.stringify({ path: path })
+    });
+    if (!r.ok) msg("打开访达失败", "err");
+  } catch (e) {
+    msg("打开失败: " + e, "err");
+  }
+}
+
+// 唤起原生选目录
+async function triggerNativeFolderPicker() {
+  try {
+    const r = await F("/choose-folder", { method: "POST", headers: H() });
+    const data = await r.json();
+    if (data.ok && data.path) {
+      document.getElementById("f-path").value = data.path;
+      const parts = data.path.replace(/\\/g, "/").split("/").filter(Boolean);
+      if (parts.length) {
+        document.getElementById("f-name").value = parts[parts.length - 1];
+      }
+    }
+  } catch (e) {
+    // 降级为手动输入
+  }
+}
+
+// 文件夹渲染
+function renderFolders(folders) {
+  CURRENT_FOLDERS = folders || [];
+  const listEl = document.getElementById("folders-card-list");
+  listEl.innerHTML = "";
+  
+  const has401 = CURRENT_FOLDERS.some(f => (f.last_error || "").includes("401") || (f.last_error || "").includes("Unauthorized"));
+  const authBanner = document.getElementById("auth-warning-banner");
+  if (authBanner) {
+    authBanner.style.display = has401 ? "block" : "none";
+  }
+  
+  const filtered = CURRENT_FOLDERS.filter(f => {
+    if (!FILTER_KEYWORD) return true;
+    return (f.name && f.name.toLowerCase().includes(FILTER_KEYWORD)) ||
+           (f.local_path && f.local_path.toLowerCase().includes(FILTER_KEYWORD));
+  });
+
+  document.getElementById("badge-folders").textContent = CURRENT_FOLDERS.length;
+  
+  // 更新时光机与分享里的文件夹下拉选项
+  const vSel = document.getElementById("v-folder");
+  const shSel = document.getElementById("sh-folder");
+  const curVSel = vSel.value;
+  const curShSel = shSel.value;
+  
+  vSel.innerHTML = '<option value="">选择文件夹…</option>';
+  shSel.innerHTML = '<option value="">选择文件夹</option>';
+  CURRENT_FOLDERS.forEach(f => {
+    vSel.insertAdjacentHTML("beforeend", `<option value="${esc(f.name)}">${esc(f.name)}</option>`);
+    shSel.insertAdjacentHTML("beforeend", `<option value="${esc(f.name)}">${esc(f.name)}</option>`);
+  });
+  if (curVSel) vSel.value = curVSel;
+  if (curShSel) shSel.value = curShSel;
+
+  if (!filtered.length) {
+    listEl.innerHTML = `
+      <div class="empty-view">
+        <span class="empty-icon">📁</span>
+        <div class="empty-title">${FILTER_KEYWORD ? "未匹配到相关同步文件夹" : "暂未接入同步文件夹"}</div>
+        <div class="empty-desc">${FILTER_KEYWORD ? "请尝试更换关键词搜索" : "可点击下方拖拽接入或点击「+ 接入新文件夹」开始同步"}</div>
+      </div>`;
+    return;
+  }
+
+  for (const f of [...filtered].sort((a,b)=>a.name.localeCompare(b.name))) {
+    let stateLabel = "已是最新", stateCls = "ok";
+    let isSyncing = false;
+    if (f.paused) {
+      stateLabel = "已暂停";
+      stateCls = "pill-badge";
+    } else if (f.last_error) {
+      stateLabel = "同步异常: " + f.last_error;
+      stateCls = "err";
+    } else if (f.conflicts_total > 0) {
+      stateLabel = f.conflicts_total + " 处冲突待处理";
+      stateCls = "warn";
+    } else if (f.last_stats && (f.last_stats.includes("↑") || f.last_stats.includes("↓"))) {
+      stateLabel = "同步传输中: " + f.last_stats;
+      stateCls = "accent";
+      isSyncing = true;
+    }
+
+    const lastTime = f.last_sync ? new Date(f.last_sync).toLocaleTimeString() : "未同步";
+    
+    listEl.insertAdjacentHTML("beforeend", `
+      <div class="item-card">
+        <div class="item-card-top">
+          <div class="item-card-main">
+            <div class="folder-mac-icon">
+              <svg fill="currentColor" viewBox="0 0 24 24"><path d="M19.5 21a3 3 0 003-3v-4.5a3 3 0 00-3-3h-1.5V9a3 3 0 00-3-3h-4.243a3 3 0 01-2.121-.879L7.515 4.001A3 3 0 005.394 3.12H4.5A3 3 0 001.5 6.12v11.88a3 3 0 003 3h15z"/></svg>
+            </div>
+            <div class="item-details">
+              <div class="item-name-row">
+                <span class="item-title">${esc(f.name)}</span>
+                <span class="pill-badge ${stateCls}">
+                  ${isSyncing ? '<svg style="width:10px;height:10px;animation:spin 1s linear infinite;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>' : ''}
+                  ${esc(stateLabel)}
+                </span>
+              </div>
+              <div class="item-path">
+                ${esc(f.local_path)}
+                <button class="link-btn" onclick='revealPath("${esc(f.local_path)}")' title="在 macOS 访达中查看此目录">
+                  <svg style="width:11px;height:11px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
+                  在访达中显示
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-actions">
+            <button class="btn btn-sm" onclick='syncFolder("${esc(f.name)}")' title="立即增量对账">
+              <svg style="width:11px;height:11px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+              同步
+            </button>
+            <button class="btn btn-sm" onclick='togglePause("${esc(f.name)}", ${f.paused ? "false" : "true"})'>
+              ${f.paused ? "恢复" : "暂停"}
+            </button>
+            <button class="btn btn-sm btn-danger" onclick='removeFolder("${esc(f.name)}")' title="仅解除同步追踪，保留本地与远程文件">
+              移除
+            </button>
+          </div>
+        </div>
+
+        <div class="item-card-meta">
+          <div style="display:flex;gap:12px;align-items:center;">
+            <span>📄 <b>${f.files || 0}</b> 个文件</span>
+            <span>•</span>
+            <span>游标 <code style="font-family:var(--font-mono);font-size:11px;">#${f.cursor || 0}</code></span>
+            <span>•</span>
+            <span>最近对账: ${lastTime}</span>
+          </div>
+          <div class="meta-badges">
+            <span class="pill-badge">CDC增量</span>
+          </div>
+        </div>
+      </div>
+    `);
+  }
+}
+
+// 刷新全部状态
+async function refresh() {
+  let initd = true;
+  try {
+    const st = await (await F("/setup-status")).json();
+    initd = st.initialized;
+    setConn(initd ? "ok" : "warn", initd ? "已连接" : "待初始化配置");
+  } catch (e) {
+    setConn("err", "daemon 通信失败");
+  }
+
+  document.getElementById("setup-screen").style.display = initd ? "none" : "block";
+  document.getElementById("main-content-pane").style.display = initd ? "flex" : "none";
+  if (!initd) return;
+
+  loadInfo();
+
+  // 1. 同步文件夹
+  try {
+    const s = await (await F("/status")).json();
+    renderFolders(s.folders || []);
+  } catch (e) {
+    if (String(e).includes("401")) msg("认证过期，请重新打开管理台", "err");
+  }
+
+  // 2. 待处理冲突
+  try {
+    const c = await (await F("/conflicts")).json();
+    const list = c.conflicts || [];
+    document.getElementById("badge-conflicts").textContent = list.length;
+    const box = document.getElementById("conflicts-container");
+    if (!list.length) {
+      box.innerHTML = `
+        <div class="empty-view">
+          <span class="empty-icon" style="color:var(--ok);">✓</span>
+          <div class="empty-title">一切安好，暂无文件冲突</div>
+          <div class="empty-desc">所有修改均已安全按游标合并</div>
+        </div>`;
+    } else {
+      box.innerHTML = "";
+      for (const it of list) {
+        box.insertAdjacentHTML("beforeend", `
+          <div class="conflict-card">
+            <div class="conflict-header">
+              <span style="display:flex;align-items:center;gap:6px;">
+                <span>⚠️</span>
+                <span>${esc(it.folder)} / ${esc(it.rel)}</span>
+              </span>
+              <span style="font-size:11.5px;font-weight:normal;color:var(--text-secondary);">${fmtBytes(it.size)}</span>
+            </div>
+            <div class="conflict-grid">
+              <div class="conflict-side">
+                <div>
+                  <h4>💻 本机当前文件 (Local)</h4>
+                  <p class="desc" style="margin-top:6px;">${esc(it.rel)}</p>
+                </div>
+                <button class="btn btn-sm" onclick='resolveConflict("${esc(it.folder)}","${esc(it.rel)}","${esc(it.copy_rel)}","local")'>
+                  ✓ 保留当前（删除副本）
+                </button>
+              </div>
+              <div class="conflict-side">
+                <div>
+                  <h4>☁️ 冲突副本版本 (Conflict Copy)</h4>
+                  <p class="desc" style="margin-top:6px;">${esc(it.copy_rel)}</p>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick='resolveConflict("${esc(it.folder)}","${esc(it.rel)}","${esc(it.copy_rel)}","copy")'>
+                  ↺ 采用副本（覆盖原名）
+                </button>
+              </div>
+            </div>
+          </div>
+        `);
+      }
+    }
+  } catch (e) {}
+
+  // 3. 用量
+  try {
+    const u = await (await F("/usage")).json();
+    const used = u.used_bytes || 0, quota = u.quota_bytes || 0;
+    const pct = quota > 0 ? Math.min(100, (used / quota * 100)) : 0;
+    document.getElementById("storage-text-num").textContent = fmtBytes(used) + " / " + (quota > 0 ? fmtBytes(quota) : "不限");
+    document.getElementById("storage-fill").style.width = pct + "%";
+    document.getElementById("storage-pct").textContent = pct.toFixed(1) + "%";
+  } catch (e) {}
+
+  // 4. 回收站
+  try {
+    const t = await (await F("/server-trash")).json();
+    const items = t.items || [];
+    document.getElementById("badge-trash").textContent = items.length;
+    const box = document.getElementById("trash-card-list");
+    if (!items.length) {
+      box.innerHTML = `
+        <div class="empty-view">
+          <span class="empty-icon">🗑️</span>
+          <div class="empty-title">回收站是空的</div>
+          <div class="empty-desc">删除的文件会在此处保留 30 天以供恢复</div>
+        </div>`;
+    } else {
+      box.innerHTML = "";
+      for (const it of items) {
+        box.insertAdjacentHTML("beforeend", `
+          <div class="item-card">
+            <div class="item-card-top">
+              <div class="item-card-main">
+                <div class="folder-mac-icon" style="background:var(--err-soft);color:var(--err);">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                </div>
+                <div class="item-details">
+                  <div class="item-title" style="font-family:var(--font-mono);font-size:13px;">${esc(it.orig_path || it.name)}</div>
+                  <div class="item-path">${fmtBytes(it.size)} · 删除于 ${fmtTime(it.deleted_at)}</div>
+                </div>
+              </div>
+              <div class="card-actions">
+                <button class="btn btn-sm" onclick='trashOp("restore", ${it.id})'>一键恢复</button>
+                <button class="btn btn-sm btn-danger" onclick='trashOp("delete", ${it.id})'>彻底删除</button>
+              </div>
+            </div>
+          </div>
+        `);
+      }
+    }
+  } catch (e) {}
+
+  // 5. 分享
+  try {
+    const sh = await (await F("/server-shares")).json();
+    const list = sh.shares || [];
+    document.getElementById("badge-shares").textContent = list.length;
+    const box = document.getElementById("shares-card-list");
+    if (!list.length) {
+      box.innerHTML = `
+        <div class="empty-view">
+          <span class="empty-icon">🔗</span>
+          <div class="empty-title">暂无公开分享链接</div>
+          <div class="empty-desc">在上方表单中选择文件夹与路径可快速生成只读分享链接</div>
+        </div>`;
+    } else {
+      box.innerHTML = "";
+      for (const it of list) {
+        const link = SERVER_BASE ? SERVER_BASE + "/s/" + esc(it.token) : esc(it.token);
+        box.insertAdjacentHTML("beforeend", `
+          <div class="item-card">
+            <div class="item-card-top">
+              <div class="item-card-main">
+                <div class="folder-mac-icon" style="background:var(--accent-soft);color:var(--accent);">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1"/></svg>
+                </div>
+                <div class="item-details">
+                  <div class="item-name-row">
+                    <span class="item-title" style="font-family:var(--font-mono);font-size:13px;">${esc(it.path)}</span>
+                    ${it.has_password ? '<span class="pill-badge warn">密码保护</span>' : ''}
+                    <span class="pill-badge">${it.expires_at > 0 ? "至 " + fmtTime(it.expires_at) : "永久"}</span>
+                  </div>
+                  <div class="item-path" style="display:flex;align-items:center;gap:6px;margin-top:5px;">
+                    <code>${link}</code>
+                    <button class="link-btn" onclick='copyShareUrl("${link}")'>复制链接</button>
+                  </div>
+                </div>
+              </div>
+              <div class="card-actions">
+                <button class="btn btn-sm btn-danger" onclick='unshare("${esc(it.token)}")'>撤销</button>
+              </div>
+            </div>
+          </div>
+        `);
+      }
+    }
+  } catch (e) {}
+
+  // 6. 设备
+  try {
+    const d = await (await F("/devices")).json();
+    const list = d.devices || [];
+    document.getElementById("badge-devices").textContent = list.length;
+    const box = document.getElementById("devices-card-list");
+    if (!list.length) {
+      box.innerHTML = '<div class="empty-view"><div class="empty-title">暂无其他设备</div></div>';
+    } else {
+      box.innerHTML = "";
+      for (const it of list) {
+        box.insertAdjacentHTML("beforeend", `
+          <div class="item-card">
+            <div class="item-card-top">
+              <div class="item-card-main">
+                <div class="folder-mac-icon">
+                  <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/></svg>
+                </div>
+                <div class="item-details">
+                  <div class="item-name-row">
+                    <span class="item-title">${esc(it.name)}</span>
+                    ${it.current ? '<span class="pill-badge ok">当前设备</span>' : ''}
+                  </div>
+                  <div class="item-path">设备 ID: #${it.id} · 最近活跃: ${new Date(it.last_seen * 1000).toLocaleString()}</div>
+                </div>
+              </div>
+              <div class="card-actions">
+                ${it.current ? '' : `<button class="btn btn-sm btn-danger" onclick='revokeDevice("${it.id}")'>吊销凭证</button>`}
+              </div>
+            </div>
+          </div>
+        `);
+      }
+    }
+  } catch (e) {}
+
+  // 7. 活动日志
+  try {
+    const a = await (await F("/audit")).json();
+    const list = a.entries || [];
+    const box = document.getElementById("audit-card-list");
+    if (!list.length) {
+      box.innerHTML = '<div class="empty-view"><div class="empty-title">暂无活动记录</div></div>';
+    } else {
+      box.innerHTML = "";
+      for (const it of list.slice(0, 40)) {
+        box.insertAdjacentHTML("beforeend", `
+          <div class="item-card" style="padding:10px 14px;">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12px;">
+              <span class="pill-badge">${esc(it.event || "SYNC")}</span>
+              <span style="flex:1;font-family:var(--font-mono);color:var(--text-secondary);word-break:break-all;">${esc(it.detail || "")}</span>
+              <span style="color:var(--text-tertiary);font-size:11px;">${it.ts ? new Date(it.ts * 1000).toLocaleTimeString() : ""}</span>
+            </div>
+          </div>
+        `);
+      }
+    }
+  } catch (e) {}
+}
+
+async function loadInfo() {
+  try {
+    const i = await (await F("/server-info")).json();
+    SERVER_BASE = (i.server_url || "").replace(/\/+$/, "");
+    CURRENT_USER = i.user || "";
+    CURRENT_DEVICE_NAME = i.device_name || "";
+    if (CURRENT_USER) {
+      const uEl = document.getElementById("storage-user");
+      if (uEl) uEl.textContent = CURRENT_USER;
+    }
+  } catch (e) {}
+}
+
+function openReauthModal() {
+  document.getElementById("reauth-url").value = SERVER_BASE || "";
+  document.getElementById("reauth-user").value = CURRENT_USER || "";
+  document.getElementById("reauth-dev").value = CURRENT_DEVICE_NAME || "";
+  document.getElementById("reauth-pass").value = "";
+  document.getElementById("reauth-modal").classList.add("show");
+  setTimeout(() => document.getElementById("reauth-pass").focus(), 100);
+}
+function closeReauthModal() {
+  document.getElementById("reauth-modal").classList.remove("show");
+}
+async function doReauth() {
+  const server_url = document.getElementById("reauth-url").value.trim();
+  const user = document.getElementById("reauth-user").value.trim();
+  const password = document.getElementById("reauth-pass").value;
+  const device_name = document.getElementById("reauth-dev").value.trim();
+  if (!server_url || !user || !password) {
+    msg("请填写服务端地址、用户名与密码", "err");
+    return;
+  }
+  const r = await F("/setup", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify({ server_url, user, password, device_name })
+  });
+  if (!r.ok) {
+    msg("登录失败: " + await r.text(), "err");
+  } else {
+    msg("凭证已更新，正在恢复同步", "ok");
+    closeReauthModal();
+    refresh();
+  }
+}
+
+// 操作方法
+async function syncAll() {
+  const icon = document.getElementById("sync-spin-icon");
+  if (icon) icon.style.animation = "spin 1s linear infinite";
+  try {
+    await F("/sync", { method: "POST", headers: H(), body: JSON.stringify({ folder: "" }) });
+    msg("已触发全部文件夹增量同步", "ok");
+  } catch (e) {
+    msg("触发失败", "err");
+  }
+  setTimeout(() => {
+    if (icon) icon.style.animation = "";
+    refresh();
+  }, 1000);
+}
+
+async function syncFolder(name) {
+  await F("/sync", { method: "POST", headers: H(), body: JSON.stringify({ folder: name }) });
+  msg(`已对 ${name} 触发同步`, "ok");
+  refresh();
+}
+
+async function togglePause(name, toPause) {
+  const path = toPause ? "/pause" : "/resume";
+  await F(path, { method: "POST", headers: H(), body: JSON.stringify({ folder: name }) });
+  msg(toPause ? `已暂停 ${name}` : `已恢复 ${name}`, "ok");
+  refresh();
+}
+
+async function removeFolder(name) {
+  if (!confirm(`确定解除追踪「${name}」？\n注意：本地文件与云端副本均会完整保留。`)) return;
+  const r = await F("/remove", { method: "POST", headers: H(), body: JSON.stringify({ name: name }) });
+  if (!r.ok) msg("移除失败: " + await r.text(), "err");
+  else msg(`已解除追踪 ${name}`, "ok");
+  refresh();
+}
+
+async function resolveConflict(folder, rel, copyRel, choice) {
+  const r = await F("/resolve", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify({ folder: folder, rel: rel, copy_rel: copyRel, choice: choice })
+  });
+  if (!r.ok) msg("决策提交失败", "err");
+  else {
+    msg(choice === "local" ? "已保留本机版本" : "已采用副本覆盖", "ok");
+    refresh();
+  }
+}
+
+async function loadVersions() {
+  const folder = document.getElementById("v-folder").value.trim();
+  const rel = document.getElementById("v-rel").value.trim();
+  if (!folder || !rel) { msg("请选择文件夹并填写相对路径", "err"); return; }
+  
+  try {
+    const v = await (await F(`/versions?folder=${encodeURIComponent(folder)}&rel=${encodeURIComponent(rel)}`)).json();
+    const box = document.getElementById("version-timeline-box");
+    const list = v.versions || [];
+    if (!list.length) {
+      box.innerHTML = `
+        <div class="empty-view">
+          <span class="empty-icon">📂</span>
+          <div class="empty-title">无此文件的历史覆盖记录</div>
+          <div class="empty-desc">每次云端同名覆盖时会自动沉淀历史快照</div>
+        </div>`;
+      return;
+    }
+
+    box.innerHTML = "";
+    for (const it of list) {
+      box.insertAdjacentHTML("beforeend", `
+        <div class="timeline-node">
+          <span class="timeline-dot"></span>
+          <div>
+            <div style="font-weight:600;font-size:13px;display:flex;align-items:center;gap:6px;">
+              <span>快照 #${it.id}</span>
+              <span class="pill-badge">${fmtBytes(it.size)}</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-secondary);font-family:var(--font-mono);margin-top:3px;">
+              时间: ${fmtTime(it.mtime)}
+            </div>
+          </div>
+          <button class="btn btn-sm" onclick='restoreVersion("${esc(folder)}","${esc(rel)}",${it.id})'>
+            回滚至此版本
+          </button>
+        </div>
+      `);
+    }
+  } catch (e) {
+    msg("查询版本失败: " + e, "err");
+  }
+}
+
+async function restoreVersion(folder, rel, vid) {
+  if (!confirm(`确定将 ${rel} 回滚至历史快照 #${vid}？`)) return;
+  const r = await F("/version-restore", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify({ folder: folder, rel: rel, version_id: vid })
+  });
+  if (!r.ok) msg("回写失败: " + await r.text(), "err");
+  else msg("快照已回写至本地，正在全端同步", "ok");
+}
+
+async function trashOp(op, id) {
+  const r = await F("/trash-" + op, {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify({ id: id })
+  });
+  if (!r.ok) msg("操作失败: " + await r.text(), "err");
+  else msg(op === "restore" ? "已恢复至原目录" : "已彻底删除", "ok");
+  refresh();
+}
+
+async function createShare() {
+  const folder = document.getElementById("sh-folder").value.trim();
+  const rel = document.getElementById("sh-rel").value.trim();
+  const hours = parseInt(document.getElementById("sh-hours").value || "0");
+  const password = document.getElementById("sh-pass").value;
+  if (!folder || !rel) { msg("请选择文件夹并填写相对路径", "err"); return; }
+  
+  const r = await F("/share-create", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify({ folder, rel, hours, password })
+  });
+  if (!r.ok) msg("创建分享失败: " + await r.text(), "err");
+  else {
+    msg("分享已生成", "ok");
+    document.getElementById("sh-rel").value = "";
+    document.getElementById("sh-pass").value = "";
+    refresh();
+  }
+}
+
+async function unshare(token) {
+  const r = await F("/share-delete", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify({ token })
+  });
+  if (!r.ok) msg("撤销失败", "err");
+  else msg("分享已撤销", "ok");
+  refresh();
+}
+
+async function copyShareUrl(url) {
+  try {
+    await navigator.clipboard.writeText(url);
+    msg("链接已复制到剪贴板", "ok");
+  } catch (e) {
+    const ta = document.createElement("textarea"); ta.value = url; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove(); msg("链接已复制到剪贴板", "ok");
+  }
+}
+
+async function revokeDevice(id) {
+  if (!confirm(`确认吊销设备 #${id}？该设备凭据将立即失效。`)) return;
+  const r = await F("/devices/" + id, { method: "DELETE" });
+  if (!r.ok) msg("吊销失败", "err");
+  else msg("设备已吊销", "ok");
+  refresh();
+}
+
+function openAddFolderModal() {
+  document.getElementById("add-modal").classList.add("show");
+}
+function closeAddFolderModal() {
+  document.getElementById("add-modal").classList.remove("show");
+}
+
+async function addFolder() {
+  const body = {
+    local_path: document.getElementById("f-path").value.trim(),
+    name: document.getElementById("f-name").value.trim(),
+    use_gitignore: document.getElementById("f-gi").checked,
+    excludes: document.getElementById("f-ex").value.split(",").map(s => s.trim()).filter(Boolean)
+  };
+  if (!body.local_path) { msg("请填写或浏览选择本地目录", "err"); return; }
+  
+  const r = await F("/add", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) msg("接入失败: " + await r.text(), "err");
+  else {
+    msg(`成功接入「${body.name || body.local_path}」`, "ok");
+    document.getElementById("f-path").value = "";
+    document.getElementById("f-name").value = "";
+    closeAddFolderModal();
+    refresh();
+  }
+}
+
+async function doSetup() {
+  const body = {
+    server_url: document.getElementById("s-url").value.trim(),
+    user: document.getElementById("s-user").value.trim(),
+    password: document.getElementById("s-pass").value,
+    device_name: document.getElementById("s-dev").value.trim()
+  };
+  if (!body.server_url || !body.user) { msg("请填写服务端地址与账号", "err"); return; }
+  
+  const r = await F("/setup", {
+    method: "POST",
+    headers: H(),
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) msg("初始化配置失败: " + await r.text(), "err");
+  else {
+    msg("配置成功，正在启动同步", "ok");
+    refresh();
+  }
+}
+
+// 拖拽接入文件夹监听
+const dropZone = document.getElementById("drop-zone-folder");
+["dragenter", "dragover"].forEach(eventName => {
+  dropZone.addEventListener(eventName, e => {
+    e.preventDefault(); e.stopPropagation();
+    dropZone.classList.add("dragover");
+  }, false);
+});
+["dragleave", "drop"].forEach(eventName => {
+  dropZone.addEventListener(eventName, e => {
+    e.preventDefault(); e.stopPropagation();
+    dropZone.classList.remove("dragover");
+  }, false);
+});
+dropZone.addEventListener("drop", e => {
+  const dt = e.dataTransfer;
+  const files = dt.files;
+  if (files && files.length > 0) {
+    const f = files[0];
+    if (f.path) {
+      document.getElementById("f-path").value = f.path;
+      document.getElementById("f-name").value = f.name;
+      openAddFolderModal();
+    } else {
+      openAddFolderModal();
+    }
+  }
+});
+
+// 初始化启动轮询
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>
