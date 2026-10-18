@@ -150,12 +150,15 @@ ysync install      # 设为开机自启
 # 4. 日常操作
 # -----------------------------
 ysync status                               # 查看各文件夹同步状态
+ysync update                               # 检查并一键自动升级客户端（支持 --check 仅检查）
 open http://127.0.0.1:8730/                # 打开 macOS 原生控制台（或直接启动 y-sync.app）
 ysync trash list                           # 查看服务端回收站
 ysync trash restore 3                      # 恢复已删除的项目
 ysync versions list my-project src/main.rs # 查看指定文件的历史覆盖版本
 ysync share my-project docs -hours 72      # 生成对外分享链接
 ```
+
+> 💡 **自动更新机制**：桌面客户端（`y-sync.app`）与后台守护进程默认每 24 小时自动检查一次 GitHub Release 新版本。发现新版本时托盘菜单会标红提醒、控制中心顶部展示更新横幅，点击即可一键无感升级。
 
 ---
 
@@ -274,3 +277,4 @@ desktop/src-tauri     macOS / Linux / Windows 原生桌面外壳（菜单栏托�
 - 冲突副本命名中的设备名为“解决冲突的设备”。
 - 大文件 SHA-256 全量哈希暂无缓存复用（仅比对本地状态库中记录的 mtime/size/哈希）。
 - Linux 下 WebDAV 建议以只读方式挂载。
+

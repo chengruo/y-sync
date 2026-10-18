@@ -218,6 +218,8 @@ fn main() {
             let resume_i = MenuItem::with_id(handle, "resume", "恢复全部", true, None::<&str>)?;
             let status_i =
                 MenuItem::with_id(handle, "status", "状态：检查中…", false, None::<&str>)?;
+            let update_i =
+                MenuItem::with_id(handle, "update", "检查更新…", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(handle, "quit", "退出 y-sync 壳", true, None::<&str>)?;
             let menu = Menu::with_items(
                 handle,
@@ -229,6 +231,7 @@ fn main() {
                     &pause_i,
                     &resume_i,
                     &PredefinedMenuItem::separator(handle)?,
+                    &update_i,
                     &quit_i,
                 ],
             )?;
@@ -248,7 +251,7 @@ fn main() {
                     }
                     let Some(d) = connect() else { return };
                     let r = match event.id().as_ref() {
-                        "open" => show_manager(app).map_err(|e| e.to_string()),
+                        "open" | "update" => show_manager(app).map_err(|e| e.to_string()),
                         "sync" => d.client.trigger_sync(None).map_err(|e| e.to_string()),
                         "pause" => d.client.pause("").map_err(|e| e.to_string()),
                         "resume" => d.client.resume("").map_err(|e| e.to_string()),
@@ -270,6 +273,23 @@ fn main() {
                 })
                 .build(app)?;
             tray.set_visible(true)?;
+
+            // 自动更新每日检查看门狗（启动 10s 后检查，之后每 1 小时轮询一次 24h 周期）
+            let update_item = update_i.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(10));
+                let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
+                loop {
+                    if let Ok(res) = ysync_core::updater::check_update(build, false) {
+                        if res.has_update {
+                            let _ = update_item.set_text(format!("✨ 发现新版本 {} (点击查看)", res.latest_version));
+                        } else {
+                            let _ = update_item.set_text("检查更新…");
+                        }
+                    }
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
+            });
 
             // 状态轮询：更新托盘图标与状态文案（3s）；C3：token 变化 → 管理台窗口重导航（401 自愈）
             let status_item = status_i.clone();

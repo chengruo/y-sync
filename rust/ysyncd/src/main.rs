@@ -39,6 +39,7 @@ fn main() {
         "revoke" => cmd_revoke(&args[1..]),
         "remove" => cmd_remove(&args[1..]),
         "ui" => cmd_ui(),
+        "update" => cmd_update(&args[1..]),
         "-v" | "--version" | "version" => {
             let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
             println!("ysync v{build} (Rust 客户端, 协议 v1 兼容)");
@@ -72,6 +73,7 @@ fn usage() -> ! {
   ysyncd devices / ysyncd revoke <id>          设备管理（吊销丢失设备）
   ysyncd remove  <name>                          解除跟踪文件夹
   ysyncd ui                                      打开本地管理台
+  ysyncd update [--check]                        检查或自动升级客户端
   ysyncd version
 "#
     );
@@ -361,6 +363,25 @@ fn cmd_daemon(log: impl Fn(String) + Send + Sync + 'static, args: &[String]) -> 
         watcher_slot: std::sync::Arc::new(std::sync::Mutex::new(None)),
         watch_tx: std::sync::Arc::new(std::sync::Mutex::new(None)),
     };
+
+    // 自动更新每日检查看门狗（启动 10s 后检查，之后每 1 小时轮询一次 24h 周期）
+    let update_log = d.log.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
+        loop {
+            if let Ok(res) = ysync_core::updater::check_update(build, false) {
+                if res.has_update {
+                    update_log(format!(
+                        "level=INFO msg=\"✨ 发现新版本 {}（当前: v{}），可运行 'ysync update' 或在控制中心一键升级\"",
+                        res.latest_version, build
+                    ));
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    });
+
     d.run(interval, reconcile);
     Ok(())
 }
@@ -648,6 +669,71 @@ fn cmd_ui() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_update(args: &[String]) -> Result<()> {
+    let check_only = args.iter().any(|a| a == "--check" || a == "-c");
+    let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
+    println!("==> 检查更新 (当前版本: v{build})...");
+
+    let res = ysync_core::updater::check_update(build, true)?;
+    if !res.has_update {
+        println!("✓ 已是最新版本 ({})", res.latest_version);
+        return Ok(());
+    }
+
+    println!("✨ 发现新版本: {}", res.latest_version);
+    if !res.release_notes.is_empty() {
+        println!("\n更新日志:\n{}\n", res.release_notes.trim());
+    }
+
+    if check_only {
+        println!("提示: 运行 'ysync update' 即可开始自动升级。");
+        return Ok(());
+    }
+
+    println!("==> 开始下载并更新...");
+    let release = ysync_core::updater::fetch_latest_release(ysync_core::updater::DEFAULT_REPO)?;
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let asset_name = ysync_core::updater::find_cli_asset_name(os, arch)
+        .ok_or_else(|| ysync_core::Error::Msg(format!("未找到适用于 {os}-{arch} 的构建资产")))?;
+    let asset = release
+        .assets
+        .iter()
+        .find(|a| a.name == asset_name)
+        .ok_or_else(|| ysync_core::Error::Msg(format!("Release 资产中未包含 {asset_name}")))?;
+
+    println!(
+        "    下载: {} (约 {:.1}MB)",
+        asset.name,
+        asset.size as f64 / 1024.0 / 1024.0
+    );
+    ysync_core::updater::update_current_binary(&asset.browser_download_url)?;
+    println!("✓ 客户端已成功更新至 {}！", res.latest_version);
+
+    #[cfg(target_os = "macos")]
+    {
+        let app_path = std::path::Path::new("/Applications/y-sync.app");
+        if app_path.exists() {
+            if let Some(dmg_asset) = ysync_core::updater::find_macos_dmg_asset(&release.assets, arch) {
+                println!("==> 检测到系统已安装桌面应用 (/Applications/y-sync.app)，联动更新桌面包...");
+                let tmp_dmg = std::env::temp_dir().join(format!("ysync_{}.dmg", res.latest_version));
+                if let Err(e) = ysync_core::updater::download_file(&dmg_asset.browser_download_url, &tmp_dmg) {
+                    eprintln!("下载桌面包失败: {e}");
+                } else {
+                    if let Err(e) = ysync_core::updater::install_macos_desktop_dmg(&tmp_dmg) {
+                        eprintln!("更新桌面包失败: {e}");
+                    } else {
+                        println!("✓ 桌面应用 /Applications/y-sync.app 同步更新完成！");
+                    }
+                    let _ = std::fs::remove_file(&tmp_dmg);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn fmt_unix(secs: i64) -> String {

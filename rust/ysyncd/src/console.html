@@ -809,7 +809,7 @@ body {
     </svg>
     <div class="app-info">
       <h1>y-sync 控制中心</h1>
-      <span class="sub">轻量文件同步 · 本机控制台</span>
+      <span class="sub" id="app-sub-version">轻量文件同步 · 本机控制台</span>
     </div>
   </div>
 
@@ -830,6 +830,19 @@ body {
     </button>
   </div>
 </header>
+
+<!-- 自动更新横幅（默认隐藏，发现新版本时展示） -->
+<div id="update-banner" style="display:none; background:var(--accent-soft); border-bottom:1px solid var(--accent); padding:8px 16px; font-size:12.5px; align-items:center; justify-content:space-between; z-index:9; flex-shrink:0;">
+  <div style="display:flex; align-items:center; gap:8px;">
+    <span style="font-size:14px;">✨</span>
+    <span id="update-banner-text" style="font-weight:500;">发现新版本</span>
+  </div>
+  <div style="display:flex; align-items:center; gap:8px;">
+    <button class="btn btn-sm btn-primary" id="btn-apply-update" onclick="applyUpdate()">立即升级</button>
+    <a href="#" target="_blank" id="update-release-link" class="btn btn-sm" style="text-decoration:none;">更新日志</a>
+    <button class="btn btn-sm" onclick="dismissUpdateBanner()" style="padding:2px 8px;" title="忽略本次提示">✕</button>
+  </div>
+</div>
 
 <!-- Toast 提示 -->
 <div id="toast-msg"></div>
@@ -1906,9 +1919,69 @@ dropZone.addEventListener("drop", e => {
   }
 });
 
+// 自动更新逻辑
+async function checkUpdateStatus() {
+  try {
+    const res = await F("/update/status", { headers: H() });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.current_version) {
+      const sub = document.getElementById("app-sub-version");
+      if (sub) sub.innerText = `轻量文件同步 · v${data.current_version}`;
+    }
+    const banner = document.getElementById("update-banner");
+    if (data.has_update) {
+      if (banner) {
+        banner.style.display = "flex";
+        document.getElementById("update-banner-text").innerText = `发现新版本 ${data.latest_version}（当前: v${data.current_version}）`;
+        const link = document.getElementById("update-release-link");
+        if (link && data.release_url) link.href = data.release_url;
+      }
+    } else {
+      if (banner) banner.style.display = "none";
+    }
+  } catch(e) {}
+}
+
+async function applyUpdate() {
+  const btn = document.getElementById("btn-apply-update");
+  if (btn) {
+    btn.disabled = true;
+    btn.innerText = "正在下载与安装…";
+  }
+  msg("正在下载新版本安装包，请稍候…", "ok");
+  try {
+    const res = await F("/update/apply", { method: "POST", headers: H() });
+    const data = await res.json();
+    if (data.ok) {
+      msg(data.message || "更新成功！请重启应用生效", "ok");
+      if (btn) btn.innerText = "更新成功 (请重启)";
+    } else {
+      msg("更新失败: " + (data.error || "未知错误"), "err");
+      if (btn) {
+        btn.disabled = false;
+        btn.innerText = "重试升级";
+      }
+    }
+  } catch(e) {
+    msg("更新请求异常: " + e, "err");
+    if (btn) {
+      btn.disabled = false;
+      btn.innerText = "重试升级";
+    }
+  }
+}
+
+function dismissUpdateBanner() {
+  const banner = document.getElementById("update-banner");
+  if (banner) banner.style.display = "none";
+}
+
 // 初始化启动轮询
 refresh();
 setInterval(refresh, 3000);
+setTimeout(checkUpdateStatus, 1000);
+setInterval(checkUpdateStatus, 600000);
 </script>
 </body>
 </html>
