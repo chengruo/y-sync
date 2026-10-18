@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>y-sync Logo 迭代方案预览 — Iterations</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+    padding: 2.5rem;
+    transition: background-color 0.3s, color 0.3s;
+  }
+  body.light { background: #f5f5f7; color: #1d1d1f; }
+  body.dark { background: #121214; color: #f5f5f7; }
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+  }
+  .title-group h1 { font-size: 1.6rem; font-weight: 700; letter-spacing: -0.02em; }
+  .title-group p { font-size: 0.9rem; opacity: 0.7; margin-top: 0.3rem; }
+  .toggle {
+    padding: 0.5rem 1.1rem;
+    border: 1px solid rgba(128, 128, 128, 0.3);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 1.8rem;
+    margin-bottom: 3rem;
+  }
+  .card {
+    border: 1px solid rgba(128, 128, 128, 0.2);
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+  }
+  .card:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.12);
+  }
+  .card-img {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2.5rem 2rem;
+    min-height: 250px;
+  }
+  body.light .card-img { background: #ffffff; }
+  body.dark .card-img { background: #1e1e22; }
+  .card-img img {
+    max-width: 100%;
+    max-height: 190px;
+    filter: drop-shadow(0 8px 16px rgba(0,0,0,0.12));
+  }
+  .card-info {
+    padding: 1rem 1.2rem;
+    border-top: 1px solid rgba(128, 128, 128, 0.15);
+  }
+  body.light .card-info { background: #fafafc; }
+  body.dark .card-info { background: #18181b; }
+  .card-label {
+    font-size: 1rem;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .card-desc {
+    font-size: 0.8rem;
+    opacity: 0.75;
+    line-height: 1.4;
+  }
+  .badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: #0071e3;
+    color: #fff;
+  }
+  .section-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 2rem 0 1rem 0;
+  }
+  .favicon-strip {
+    display: flex;
+    gap: 2rem;
+    flex-wrap: wrap;
+    align-items: end;
+    padding: 1.5rem;
+    border-radius: 14px;
+    border: 1px solid rgba(128, 128, 128, 0.2);
+  }
+  body.light .favicon-strip { background: #ffffff; }
+  body.dark .favicon-strip { background: #1e1e22; }
+  .fav-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .fav-sizes {
+    display: flex;
+    gap: 1.2rem;
+    align-items: end;
+  }
+  .fav-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .fav-box span { font-size: 0.72rem; opacity: 0.6; font-family: monospace; }
+</style>
+</head>
+<body class="light">
+  <div class="header">
+    <div class="title-group">
+      <h1>y-sync Logo 方案 1（莫比乌斯流光）细化迭代</h1>
+      <p>基于方案 1 延伸 4 组精修变体：按最新迭代倒序展示 · 支持深浅色对比与小尺寸穿透力校验</p>
+    </div>
+    <button class="toggle" onclick="document.body.classList.toggle('dark'); document.body.classList.toggle('light'); this.textContent = document.body.classList.contains('dark') ? '☀️ 切换浅色' : '🌙 切换深色';">🌙 切换深色</button>
+  </div>
+
+  <div class="grid">
+    <!-- Iteration 4 -->
+    <div class="card">
+      <div class="card-img">
+        <img src="iterations/iteration-4.svg" alt="Iteration 4">
+      </div>
+      <div class="card-info">
+        <div class="card-label">
+          <span>迭代 4：明朗科技蓝底板版</span>
+          <span class="badge" style="background:#0284c7;">明朗高反差</span>
+        </div>
+        <div class="card-desc">Apple 官方高能科技蓝 Squircle 底板，搭配纯白与天青色流环，在 Dock 栏与浅/深色壁纸上视觉冲击力与辨识度极强。</div>
+      </div>
+    </div>
+
+    <!-- Iteration 3 -->
+    <div class="card">
+      <div class="card-img">
+        <img src="iterations/iteration-3.svg" alt="Iteration 3">
+      </div>
+      <div class="card-info">
+        <div class="card-label">
+          <span>迭代 3：微晶漫反射与发光核</span>
+          <span class="badge" style="background:#6366f1;">精致微光</span>
+        </div>
+        <div class="card-desc">加入 macOS Sequoia 风格的环境光晕、玻璃切边反光与弧面高光条，交汇处带有律动能量脉冲，层次感最丰富。</div>
+      </div>
+    </div>
+
+    <!-- Iteration 2 -->
+    <div class="card">
+      <div class="card-img">
+        <img src="iterations/iteration-2.svg" alt="Iteration 2">
+      </div>
+      <div class="card-info">
+        <div class="card-label">
+          <span>迭代 2：负空间与小尺寸穿透优化</span>
+          <span class="badge" style="background:#34c759;">推荐标准</span>
+        </div>
+        <div class="card-desc">将线条粗细由 38px 强化至 44px，扩大左右两环内腔负空间，箭头放大 30%，在 16px/32px 下依然极为清晰。</div>
+      </div>
+    </div>
+
+    <!-- Iteration 1 -->
+    <div class="card">
+      <div class="card-img">
+        <img src="iterations/iteration-1.svg" alt="Iteration 1">
+      </div>
+      <div class="card-info">
+        <div class="card-label">
+          <span>迭代 1：方案 1 原始基准版</span>
+          <span class="badge" style="background:#8e8e93;">原始基准</span>
+        </div>
+        <div class="card-desc">方案 1 原始形态，午夜深空底色搭配青蓝莫比乌斯无限流，线条纤巧优雅。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 小尺寸辨识度校验（Favicon Check） -->
+  <h2 class="section-title">小尺寸辨识度校验 (Favicon / 菜单栏 / 启动台)</h2>
+  <div class="favicon-strip">
+    <div class="fav-item">
+      <div style="font-size:0.85rem; font-weight:600;">迭代 4 (明朗蓝底)</div>
+      <div class="fav-sizes">
+        <div class="fav-box"><img src="iterations/iteration-4.svg" width="64" height="64"><span>64px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-4.svg" width="32" height="32"><span>32px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-4.svg" width="16" height="16"><span>16px</span></div>
+      </div>
+    </div>
+
+    <div class="fav-item">
+      <div style="font-size:0.85rem; font-weight:600;">迭代 3 (高光发光核)</div>
+      <div class="fav-sizes">
+        <div class="fav-box"><img src="iterations/iteration-3.svg" width="64" height="64"><span>64px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-3.svg" width="32" height="32"><span>32px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-3.svg" width="16" height="16"><span>16px</span></div>
+      </div>
+    </div>
+
+    <div class="fav-item">
+      <div style="font-size:0.85rem; font-weight:600;">迭代 2 (负空间强化)</div>
+      <div class="fav-sizes">
+        <div class="fav-box"><img src="iterations/iteration-2.svg" width="64" height="64"><span>64px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-2.svg" width="32" height="32"><span>32px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-2.svg" width="16" height="16"><span>16px</span></div>
+      </div>
+    </div>
+
+    <div class="fav-item">
+      <div style="font-size:0.85rem; font-weight:600;">迭代 1 (原始基准)</div>
+      <div class="fav-sizes">
+        <div class="fav-box"><img src="iterations/iteration-1.svg" width="64" height="64"><span>64px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-1.svg" width="32" height="32"><span>32px</span></div>
+        <div class="fav-box"><img src="iterations/iteration-1.svg" width="16" height="16"><span>16px</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

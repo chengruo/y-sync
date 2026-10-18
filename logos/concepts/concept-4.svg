@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- 背景渐变：Apple 官方标准科技蓝渐变 -->
+    <linearGradient id="bg-grad-4" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#007aff" />
+      <stop offset="100%" stop-color="#0051a8" />
+    </linearGradient>
+
+    <!-- 顶部高光弧线 -->
+    <linearGradient id="inner-highlight" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.05" />
+    </linearGradient>
+
+    <!-- 轨道弧渐变 -->
+    <linearGradient id="orbit-grad-top" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>
+
+    <linearGradient id="orbit-grad-bottom" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#ffffff" />
+    </linearGradient>
+
+    <filter id="shadow-4" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#002d66" flood-opacity="0.4" />
+    </filter>
+  </defs>
+
+  <!-- 背景：macOS 经典科技蓝 Squircle 图标 -->
+  <g id="background">
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="url(#bg-grad-4)" />
+    <!-- 内部玻璃倒角反光 -->
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="none" stroke="url(#inner-highlight)" stroke-width="2.5" />
+  </g>
+
+  <!-- 核心图标：外围双向同步轨道环 + 核心律动 Y -->
+  <g id="icon" filter="url(#shadow-4)">
+    <!-- 上半环同步轨道弧 (顺时针向右) -->
+    <path d="M 148 230 A 136 136 0 0 1 356 195" 
+          fill="none" 
+          stroke="url(#orbit-grad-top)" 
+          stroke-width="24" 
+          stroke-linecap="round" />
+    <!-- 右侧冲刺箭头 -->
+    <polygon points="364,168 394,204 350,224" fill="#ffffff" />
+
+    <!-- 下半环同步轨道弧 (逆时针向左) -->
+    <path d="M 364 282 A 136 136 0 0 1 156 317" 
+          fill="none" 
+          stroke="url(#orbit-grad-bottom)" 
+          stroke-width="24" 
+          stroke-linecap="round" />
+    <!-- 左侧冲刺箭头 -->
+    <polygon points="148,344 118,308 162,288" fill="#38bdf8" />
+
+    <!-- 居中核心：极简坚毅的字母 Y (兼具节点分流与文件汇聚意象) -->
+    <path d="M 198 185 L 256 260 L 314 185" 
+          fill="none" 
+          stroke="#ffffff" 
+          stroke-width="28" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" />
+    <path d="M 256 260 L 256 325" 
+          fill="none" 
+          stroke="#ffffff" 
+          stroke-width="28" 
+          stroke-linecap="round" />
+    <!-- 中心能量源点 -->
+    <circle cx="256" cy="260" r="10" fill="#38bdf8" />
+  </g>
+</svg>

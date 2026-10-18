@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- 背景渐变：macOS 深空午夜质感 -->
+    <linearGradient id="bg-grad-1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e2638" />
+      <stop offset="100%" stop-color="#0c1017" />
+    </linearGradient>
+
+    <!-- 边框细高光 -->
+    <linearGradient id="border-grad-1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.22" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.04" />
+    </linearGradient>
+
+    <!-- 流动主渐变：Apple 科技蓝到天空青 -->
+    <linearGradient id="flow-grad-a" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="50%" stop-color="#0071e3" />
+      <stop offset="100%" stop-color="#0051a8" />
+    </linearGradient>
+
+    <linearGradient id="flow-grad-b" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa" />
+      <stop offset="60%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- 环形立体阴影 -->
+    <filter id="shadow-1" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#000000" flood-opacity="0.45" />
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#0071e3" flood-opacity="0.3" />
+    </filter>
+
+    <filter id="glow-1" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- 背景：macOS 标准精致 Squircle 图标底板 -->
+  <g id="background">
+    <!-- 主底板 -->
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="url(#bg-grad-1)" />
+    <!-- 顶部环境光反射边框 -->
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="none" stroke="url(#border-grad-1)" stroke-width="2" />
+  </g>
+
+  <!-- 核心图标：莫比乌斯无线环流 + Y 轴汇聚 -->
+  <g id="icon" filter="url(#shadow-1)">
+    <!-- 上行流环（青蓝渐变） -->
+    <path d="M 160 180 C 160 120, 230 110, 256 160 C 282 210, 310 270, 350 270 C 390 270, 400 220, 370 180 C 345 145, 305 155, 300 158" 
+          fill="none" 
+          stroke="url(#flow-grad-b)" 
+          stroke-width="38" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" />
+
+    <!-- 顺向同步箭头 1 (右上环端) -->
+    <polygon points="315,138 285,165 320,188" fill="#38bdf8" />
+
+    <!-- 下行回路（汇聚成 Y 字躯干并循环） -->
+    <path d="M 352 270 C 352 330, 280 340, 256 290 C 232 240, 204 180, 164 180 C 124 180, 114 230, 144 270 C 169 305, 210 295, 215 292" 
+          fill="none" 
+          stroke="url(#flow-grad-a)" 
+          stroke-width="38" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" />
+
+    <!-- 逆向同步箭头 2 (左下环端) -->
+    <polygon points="197,312 227,285 192,262" fill="#0071e3" />
+
+    <!-- 居中下引数据锚点（象征落盘稳固） -->
+    <path d="M 256 280 L 256 365" 
+          stroke="url(#flow-grad-a)" 
+          stroke-width="36" 
+          stroke-linecap="round" />
+    <circle cx="256" cy="370" r="18" fill="#38bdf8" />
+  </g>
+
+  <!-- 节点光晕微装饰 -->
+  <g id="accent">
+    <circle cx="256" cy="185" r="9" fill="#ffffff" opacity="0.9" filter="url(#glow-1)" />
+  </g>
+</svg>

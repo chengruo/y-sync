@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logos/export/logo-192.png" alt="y-sync logo" width="96" height="96" />
+</p>
+
 # y-sync
 
 轻量级文件同步服务（类 Nextcloud 场景的核心 10% 能力）：client-server 架构，

@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <!-- 背景：超质感深空深邃渐变 -->
+    <linearGradient id="bg-grad-it3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e273a" />
+      <stop offset="50%" stop-color="#0f1522" />
+      <stop offset="100%" stop-color="#06090e" />
+    </linearGradient>
+
+    <!-- 顶层环境光漫反射 -->
+    <radialGradient id="ambient-light-it3" cx="50%" cy="20%" r="70%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- 边框细晶高光 -->
+    <linearGradient id="border-grad-it3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.32" />
+      <stop offset="50%" stop-color="#38bdf8" stop-opacity="0.12" />
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.04" />
+    </linearGradient>
+
+    <!-- 莫比乌斯流光前段（亮蓝至青绿高光） -->
+    <linearGradient id="flow-top-it3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7dd3fc" />
+      <stop offset="50%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+
+    <!-- 莫比乌斯流光后段（科技深蓝回流） -->
+    <linearGradient id="flow-bottom-it3" x1="100%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb" />
+      <stop offset="50%" stop-color="#0071e3" />
+      <stop offset="100%" stop-color="#0369a1" />
+    </linearGradient>
+
+    <!-- 高斯泛光与深层阴影 -->
+    <filter id="shadow-it3" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.65" />
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#0284c7" flood-opacity="0.4" />
+    </filter>
+
+    <filter id="glow-node-it3" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- 背景底板 -->
+  <g id="background">
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="url(#bg-grad-it3)" />
+    <!-- 内部漫反射光辉 -->
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="url(#ambient-light-it3)" />
+    <!-- 边缘微晶金属切边 -->
+    <rect x="44" y="44" width="424" height="424" rx="98" fill="none" stroke="url(#border-grad-it3)" stroke-width="2.5" />
+  </g>
+
+  <!-- 核心图标：带有晶莹光泽与层叠错落感的无限流 -->
+  <g id="icon" filter="url(#shadow-it3)">
+    <!-- 上层流环 -->
+    <path d="M 160 178 C 160 112, 234 102, 256 160 C 276 216, 304 270, 350 270 C 394 270, 402 214, 368 176 C 342 146, 308 154, 298 158" 
+          fill="none" 
+          stroke="url(#flow-top-it3)" 
+          stroke-width="42" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" />
+
+    <!-- 顶部中央透明高光条（增添 Apple 玻璃质感） -->
+    <path d="M 164 168 C 170 125, 230 115, 252 165 C 265 195, 280 230, 300 250" 
+          fill="none" 
+          stroke="#ffffff" 
+          stroke-width="6" 
+          stroke-linecap="round" 
+          opacity="0.55" />
+
+    <!-- 冲锋箭头 1 -->
+    <polygon points="314,132 276,164 318,194" fill="#7dd3fc" />
+
+    <!-- 下层回路 -->
+    <path d="M 350 270 C 350 338, 276 348, 256 290 C 236 234, 208 180, 160 180 C 118 180, 110 238, 144 276 C 170 306, 204 298, 214 294" 
+          fill="none" 
+          stroke="url(#flow-bottom-it3)" 
+          stroke-width="42" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" />
+
+    <!-- 冲锋箭头 2 -->
+    <polygon points="196,320 236,288 194,256" fill="#0071e3" />
+
+    <!-- 垂直主干支柱 -->
+    <path d="M 256 278 L 256 364" 
+          stroke="url(#flow-bottom-it3)" 
+          stroke-width="40" 
+          stroke-linecap="round" />
+    <circle cx="256" cy="368" r="20" fill="#38bdf8" filter="url(#glow-node-it3)" />
+    <circle cx="256" cy="368" r="9" fill="#ffffff" />
+  </g>
+
+  <!-- 脉冲交汇能量核 -->
+  <g id="accent">
+    <circle cx="256" cy="180" r="11" fill="#ffffff" filter="url(#glow-node-it3)" />
+    <circle cx="256" cy="180" r="5" fill="#38bdf8" />
+  </g>
+</svg>
