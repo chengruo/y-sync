@@ -454,6 +454,7 @@ impl Daemon {
 
     /// 阻塞运行全部循环（轮询/对账/信号）。
     pub fn run(&self, interval: Duration, reconcile: Duration) {
+        crate::update::start_periodic_checks();
         self.log(format!(
             "level=INFO msg=\"daemon started\" interval={:?} reconcile={:?}",
             interval, reconcile

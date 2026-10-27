@@ -86,6 +86,7 @@ pub struct DaemonState {
 }
 
 struct Inner {
+    update_maintenance: bool,
     paused: HashSet<String>,
     syncing: HashSet<String>, // 进程内并发同步互斥（WS/事件/轮询可能重叠）
     status: HashMap<String, FolderStatus>,
@@ -95,6 +96,7 @@ impl DaemonState {
     pub fn new() -> Self {
         DaemonState {
             inner: Mutex::new(Inner {
+                update_maintenance: false,
                 paused: HashSet::new(),
                 syncing: HashSet::new(),
                 status: HashMap::new(),
@@ -152,7 +154,7 @@ impl DaemonState {
     /// 尝试开始同步：已暂停或正在同步则返回 false（WS/事件/轮询重叠时跳过）。
     pub fn try_begin_sync(&self, name: &str) -> bool {
         let mut g = self.inner.lock().unwrap();
-        if g.paused.contains(name) || g.syncing.contains(name) {
+        if g.update_maintenance || g.paused.contains(name) || g.syncing.contains(name) {
             return false;
         }
         g.syncing.insert(name.to_string());
@@ -161,6 +163,14 @@ impl DaemonState {
 
     pub fn end_sync(&self, name: &str) {
         self.inner.lock().unwrap().syncing.remove(name);
+    }
+
+    pub fn set_update_maintenance(&self, enabled: bool) {
+        self.inner.lock().unwrap().update_maintenance = enabled;
+    }
+
+    pub fn syncing_count(&self) -> usize {
+        self.inner.lock().unwrap().syncing.len()
     }
 
     pub fn is_paused(&self, name: &str) -> bool {
@@ -210,5 +220,25 @@ impl DaemonState {
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+    #[test]
+    fn update_maintenance_drains_existing_tasks_without_changing_user_pause() {
+        let state = DaemonState::new();
+        state.pause("paused");
+        assert!(state.try_begin_sync("running"));
+        state.set_update_maintenance(true);
+        assert_eq!(state.syncing_count(), 1);
+        assert!(!state.try_begin_sync("another"));
+        state.end_sync("running");
+        assert_eq!(state.syncing_count(), 0);
+        assert!(!state.try_begin_sync("running"));
+        state.set_update_maintenance(false);
+        assert!(state.try_begin_sync("another"));
+        assert!(!state.try_begin_sync("paused"));
     }
 }

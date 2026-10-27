@@ -88,7 +88,7 @@ jobs:
         shell: bash
         run: |
           TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
-          cargo build --release -p ysyncd
+          Y_SYNC_VERSION="${GITHUB_REF_NAME#v}" cargo build --release -p ysyncd
           mkdir -p desktop/src-tauri/binaries
           EXT=""; [ "$RUNNER_OS" = "Windows" ] && EXT=".exe"
           cp "target/release/ysyncd$EXT" "desktop/src-tauri/binaries/ysyncd-$TRIPLE$EXT"
@@ -111,6 +111,7 @@ jobs:
             [ -n "${!v}" ] || unset "$v"
           done
           V="${GITHUB_REF_NAME#v}"
+          export Y_SYNC_VERSION="$V"
           # 版本号跟随 tag（覆盖 tauri.conf.json 中固定的 0.1.0）
           npx -y @tauri-apps/cli@2 build --config "{\"version\":\"$V\"}"
           mkdir -p bundle-out
@@ -153,6 +154,7 @@ jobs:
         run: |
           mkdir -p dist
           find artifacts -type f -exec cp {} dist/ \;
+          (cd dist && sha256sum * > SHA256SUMS)
           ls -la dist/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -854,6 +854,7 @@ body {
       <span>全部同步</span>
     </button>
 
+    <button class="btn btn-sm" onclick="openUpdateModal()">检查更新</button>
     <button class="btn btn-sm" onclick="openRemoteFoldersModal()">从服务器选择</button>
     <button class="btn btn-primary btn-sm" onclick="openAddFolderModal()">
       <svg style="width:13px;height:13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
@@ -869,9 +870,9 @@ body {
     <span id="update-banner-text" style="font-weight:500;">发现新版本</span>
   </div>
   <div style="display:flex; align-items:center; gap:8px;">
-    <button class="btn btn-sm btn-primary" id="btn-apply-update" onclick="applyUpdate()">立即升级</button>
+    <button class="btn btn-sm btn-primary" id="btn-apply-update" onclick="applyUpdate()">下载并重新启动</button>
     <a href="#" target="_blank" id="update-release-link" class="btn btn-sm" style="text-decoration:none;">更新日志</a>
-    <button class="btn btn-sm" onclick="dismissUpdateBanner()" style="padding:2px 8px;" title="忽略本次提示">✕</button>
+    <button class="btn btn-sm" onclick="dismissUpdateBanner()" style="padding:2px 8px;" title="跳过此版本">✕</button>
   </div>
 </div>
 
@@ -1132,6 +1133,36 @@ body {
   </main>
 </div>
 
+<!-- 模态弹窗：客户端更新 -->
+<div class="modal-overlay" id="update-modal">
+  <div class="modal-window">
+    <div class="modal-header">
+      <h3>客户端更新</h3>
+      <button class="modal-close-btn" onclick="closeUpdateModal()">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:65vh;overflow:auto;">
+      <p id="update-versions" style="font-size:13px;">正在读取版本信息…</p>
+      <p id="update-last-check" style="font-size:12px;color:var(--text-secondary);"></p>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13px;">
+        <input type="checkbox" id="update-auto-check" onchange="setAutoUpdateCheck(this.checked)">
+        自动检查更新（每天一次）
+      </label>
+      <p id="update-job-message" role="status" aria-live="polite" style="font-size:13px;margin-top:18px;"></p>
+      <div id="update-progress-box" style="display:none;">
+        <progress id="update-progress" max="100" value="0" style="width:100%;"></progress>
+        <p id="update-progress-text" style="font-size:12px;color:var(--text-secondary);"></p>
+      </div>
+      <pre id="update-notes" style="font:12px/1.6 var(--font-sans);white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;"></pre>
+      <p style="font-size:12px;color:var(--text-secondary);">安装前会等待当前同步完成，随后自动重新启动。配置和已同步文件会保留；启动失败时恢复旧版本。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" id="update-check-now" onclick="checkUpdatesNow()">立即检查</button>
+      <button class="btn btn-sm" id="update-skip" onclick="dismissUpdateBanner()">跳过此版本</button>
+      <button class="btn btn-primary btn-sm" id="update-install" onclick="applyUpdate()" disabled>下载并重新启动</button>
+    </div>
+  </div>
+</div>
+
 <!-- 模态弹窗：选择远端项目 -->
 <div class="modal-overlay" id="remote-modal">
   <div class="modal-window">
@@ -1239,6 +1270,7 @@ body {
 </div>
 
 <script>
+const OPEN_UPDATE_ON_LOAD = location.hash === "#updates";
 // Token 处理
 let TOKEN = new URLSearchParams(location.search).get("token") || __TOKEN__;
 if (location.search.includes("token=")) {
@@ -2108,69 +2140,117 @@ dropZone.addEventListener("drop", e => {
   }
 });
 
-// 自动更新逻辑
+// 更新任务在 daemon 后台执行，页面只读取状态。
+let UPDATE_STATE = null;
+let UPDATE_POLL = null;
+let UPDATE_STARTING = false;
+function updateActive(data) {
+  return ["checking", "downloading", "verifying", "waiting_for_sync", "installing", "restarting"]
+    .includes(data?.job?.phase);
+}
+async function openUpdateModal() {
+  document.getElementById("update-modal").classList.add("show");
+  await checkUpdateStatus();
+  if (!updateActive(UPDATE_STATE)) await checkUpdatesNow();
+}
+function closeUpdateModal() {
+  document.getElementById("update-modal").classList.remove("show");
+}
+function renderUpdateStatus(data) {
+  UPDATE_STATE = data;
+  const job = data.job || {};
+  const active = updateActive(data) || UPDATE_STARTING;
+  document.getElementById("app-sub-version").textContent = `轻量文件同步 · v${data.current_version}`;
+  document.getElementById("update-versions").textContent = `当前版本：${data.current_version}　最新版本：${data.latest_version || "待检查"}`;
+  document.getElementById("update-last-check").textContent = data.last_check_at
+    ? "上次检查：" + new Date(data.last_check_at * 1000).toLocaleString() : "尚未完成版本检查";
+  document.getElementById("update-auto-check").checked = data.auto_check;
+  const message = document.getElementById("update-job-message");
+  message.textContent = job.message || (data.has_update ? "发现可用更新" : "点击立即检查获取最新版本");
+  message.style.color = job.phase === "error" ? "var(--err)" : "var(--text-main)";
+  document.getElementById("update-notes").textContent = data.release_notes || "";
+  const download = job.phase === "downloading";
+  document.getElementById("update-progress-box").style.display = download ? "block" : "none";
+  const progress = document.getElementById("update-progress");
+  if (job.total_bytes > 0) progress.value = Math.min(100, 100 * job.downloaded_bytes / job.total_bytes);
+  else progress.removeAttribute("value");
+  document.getElementById("update-progress-text").textContent = job.total_bytes > 0
+    ? `${fmtBytes(job.downloaded_bytes)} / ${fmtBytes(job.total_bytes)}` : fmtBytes(job.downloaded_bytes || 0);
+  document.getElementById("update-check-now").disabled = active;
+  document.getElementById("update-skip").disabled = active || !data.has_update;
+  const caption = active ? (job.phase === "downloading" ? "正在下载…" : "更新处理中…") : "下载并重新启动";
+  for (const id of ["btn-apply-update", "update-install"]) {
+    const button = document.getElementById(id);
+    button.disabled = active || !data.has_update;
+    button.textContent = caption;
+  }
+  const banner = document.getElementById("update-banner");
+  banner.style.display = data.has_update || active ? "flex" : "none";
+  document.getElementById("update-banner-text").textContent = active ? job.message
+    : `发现新版本 ${data.latest_version}（当前：${data.current_version}）`;
+  const link = document.getElementById("update-release-link");
+  if (data.release_url && /^https:\/\/github\.com\/chengruo\/y-sync\/releases\//.test(data.release_url)) {
+    link.href = data.release_url; link.style.display = "";
+  } else link.style.display = "none";
+  if (active && !UPDATE_POLL) UPDATE_POLL = setInterval(checkUpdateStatus, 1500);
+  if (!active && UPDATE_POLL) { clearInterval(UPDATE_POLL); UPDATE_POLL = null; }
+}
 async function checkUpdateStatus() {
   try {
-    const res = await F("/update/status", { headers: H() });
-    if (!res.ok) return;
-    const data = await res.json();
-    if (data.current_version) {
-      const sub = document.getElementById("app-sub-version");
-      if (sub) sub.innerText = `轻量文件同步 · v${data.current_version}`;
+    const response = await F("/update/status", { headers: H() });
+    if (!response.ok) throw new Error("暂时无法读取更新状态");
+    renderUpdateStatus(await response.json());
+  } catch (e) {
+    if (UPDATE_STATE?.job?.phase === "restarting") {
+      document.getElementById("update-job-message").textContent = "正在等待客户端重新启动；若页面未恢复，请重新打开客户端。";
     }
-    const banner = document.getElementById("update-banner");
-    if (data.has_update) {
-      if (banner) {
-        banner.style.display = "flex";
-        document.getElementById("update-banner-text").innerText = `发现新版本 ${data.latest_version}（当前: v${data.current_version}）`;
-        const link = document.getElementById("update-release-link");
-        if (link && data.release_url) link.href = data.release_url;
-      }
-    } else {
-      if (banner) banner.style.display = "none";
-    }
-  } catch(e) {}
-}
-
-async function applyUpdate() {
-  const btn = document.getElementById("btn-apply-update");
-  if (btn) {
-    btn.disabled = true;
-    btn.innerText = "正在下载与安装…";
   }
-  msg("正在下载新版本安装包，请稍候…", "ok");
+}
+async function checkUpdatesNow() {
+  if (UPDATE_STARTING || updateActive(UPDATE_STATE)) return;
+  UPDATE_STARTING = true;
+  document.getElementById("update-check-now").disabled = true;
   try {
-    const res = await F("/update/apply", { method: "POST", headers: H() });
-    const data = await res.json();
-    if (data.ok) {
-      msg(data.message || "更新成功！请重启应用生效", "ok");
-      if (btn) btn.innerText = "更新成功 (请重启)";
-    } else {
-      msg("更新失败: " + (data.error || "未知错误"), "err");
-      if (btn) {
-        btn.disabled = false;
-        btn.innerText = "重试升级";
-      }
-    }
-  } catch(e) {
-    msg("更新请求异常: " + e, "err");
-    if (btn) {
-      btn.disabled = false;
-      btn.innerText = "重试升级";
-    }
-  }
+    const response = await F("/update/check", { method: "POST", headers: H() });
+    if (!response.ok) throw new Error((await response.json()).error || "检查失败");
+  } catch (e) { msg(e.message, "err"); }
+  finally { UPDATE_STARTING = false; await checkUpdateStatus(); }
 }
-
-function dismissUpdateBanner() {
-  const banner = document.getElementById("update-banner");
-  if (banner) banner.style.display = "none";
+async function applyUpdate() {
+  if (UPDATE_STARTING || updateActive(UPDATE_STATE)) return;
+  UPDATE_STARTING = true;
+  document.getElementById("update-modal").classList.add("show");
+  document.getElementById("update-install").disabled = true;
+  document.getElementById("btn-apply-update").disabled = true;
+  try {
+    const response = await F("/update/apply", { method: "POST", headers: H() });
+    if (!response.ok) throw new Error((await response.json()).error || "启动更新失败");
+  } catch (e) { msg(e.message, "err"); }
+  finally { UPDATE_STARTING = false; await checkUpdateStatus(); }
+}
+async function setAutoUpdateCheck(value) {
+  try {
+    const response = await F("/update/preferences", { method: "POST", headers: H(),
+      body: JSON.stringify({ auto_check: value }) });
+    if (!response.ok) throw new Error("保存更新设置失败");
+  } catch (e) { msg(e.message, "err"); }
+  await checkUpdateStatus();
+}
+async function dismissUpdateBanner() {
+  if (updateActive(UPDATE_STATE)) return;
+  try {
+    const response = await F("/update/preferences", { method: "POST", headers: H(),
+      body: JSON.stringify({ skip_version: true }) });
+    if (!response.ok) throw new Error("保存跳过版本失败");
+  } catch (e) { msg(e.message, "err"); }
+  await checkUpdateStatus();
 }
 
 // 初始化启动轮询
 refresh();
 setInterval(refresh, 3000);
-setTimeout(checkUpdateStatus, 1000);
-setInterval(checkUpdateStatus, 600000);
+setTimeout(OPEN_UPDATE_ON_LOAD ? openUpdateModal : checkUpdateStatus, 1000);
+setInterval(checkUpdateStatus, 60000);
 </script>
 </body>
 </html>

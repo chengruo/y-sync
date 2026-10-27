@@ -11,6 +11,7 @@ mod ignore;
 mod state;
 mod props;
 mod watcher;
+mod update;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -25,6 +26,9 @@ fn main() {
         usage();
     }
     let err: Result<()> = match args[0].as_str() {
+        "__update-helper" => args.get(1)
+            .ok_or_else(|| ysync_core::Error::Msg("缺少更新计划".into()))
+            .and_then(|p| ysync_core::update_install::run_helper(Path::new(p))),
         "init" => cmd_init(&args[1..]),
         "add" => cmd_add(&args[1..]),
         "sync" => cmd_sync(&args[1..]),
@@ -674,6 +678,13 @@ fn cmd_ui() -> Result<()> {
 fn cmd_update(args: &[String]) -> Result<()> {
     let check_only = args.iter().any(|a| a == "--check" || a == "-c");
     let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
+    if !check_only {
+        if let Ok(client) = ysync_core::control::ControlClient::from_daemon_info() {
+            client.apply_update()?;
+            println!("已启动后台更新，请在客户端管理台查看进度；安装后会自动重新启动。");
+            return Ok(());
+        }
+    }
     println!("==> 检查更新 (当前版本: v{build})...");
 
     let res = ysync_core::updater::check_update(build, true)?;
@@ -709,7 +720,8 @@ fn cmd_update(args: &[String]) -> Result<()> {
         asset.name,
         asset.size as f64 / 1024.0 / 1024.0
     );
-    ysync_core::updater::update_current_binary(&asset.browser_download_url)?;
+    let checksum = ysync_core::updater::asset_checksum(&release, asset)?;
+    ysync_core::updater::update_current_binary(asset, &checksum)?;
     println!("✓ 客户端已成功更新至 {}！", res.latest_version);
 
     #[cfg(target_os = "macos")]
@@ -719,7 +731,8 @@ fn cmd_update(args: &[String]) -> Result<()> {
             if let Some(dmg_asset) = ysync_core::updater::find_macos_dmg_asset(&release.assets, arch) {
                 println!("==> 检测到系统已安装桌面应用 (/Applications/y-sync.app)，联动更新桌面包...");
                 let tmp_dmg = std::env::temp_dir().join(format!("ysync_{}.dmg", res.latest_version));
-                if let Err(e) = ysync_core::updater::download_file(&dmg_asset.browser_download_url, &tmp_dmg) {
+                let checksum = ysync_core::updater::asset_checksum(&release, dmg_asset)?;
+                if let Err(e) = ysync_core::updater::download_verified(dmg_asset, &checksum, &tmp_dmg, |_, _| {}) {
                     eprintln!("下载桌面包失败: {e}");
                 } else {
                     if let Err(e) = ysync_core::updater::install_macos_desktop_dmg(&tmp_dmg) {

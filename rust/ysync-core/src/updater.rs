@@ -5,13 +5,21 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{config_dir, Error, Result};
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
+use std::sync::Mutex;
+
+static CHECK_LOCK: Mutex<()> = Mutex::new(());
+fn enabled() -> bool { true }
 
 pub const DEFAULT_REPO: &str = "chengruo/y-sync";
 /// 24 小时检查周期（秒）
 pub const CHECK_INTERVAL_SECS: i64 = 24 * 3600;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateState {
+    #[serde(default = "enabled")]
+    pub auto_check: bool,
     #[serde(default)]
     pub last_check_at: i64,
     #[serde(default)]
@@ -24,8 +32,17 @@ pub struct UpdateState {
     pub ignored_version: Option<String>,
 }
 
+impl Default for UpdateState {
+    fn default() -> Self {
+        Self { auto_check: true, last_check_at: 0, latest_version: String::new(),
+            release_url: String::new(), release_notes: String::new(), ignored_version: None }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReleaseAsset {
+    #[serde(default)]
+    pub digest: Option<String>,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -72,6 +89,12 @@ pub fn parse_version(s: &str) -> Option<Vec<u64>> {
 
 /// 语义化版本比对：返回 a 与 b 的大小关系
 pub fn compare_version(a: &str, b: &str) -> Ordering {
+    if let (Ok(a), Ok(b)) = (
+        semver::Version::parse(a.trim().trim_start_matches(['v', 'V'])),
+        semver::Version::parse(b.trim().trim_start_matches(['v', 'V'])),
+    ) {
+        return a.cmp_precedence(&b);
+    }
     match (parse_version(a), parse_version(b)) {
         (Some(v1), Some(v2)) => {
             let max_len = v1.len().max(v2.len());
@@ -118,14 +141,14 @@ pub fn updater_state_path() -> Result<PathBuf> {
 pub fn load_update_state() -> UpdateState {
     let p = match updater_state_path() {
         Ok(p) => p,
-        Err(_) => return UpdateState::default(),
+        Err(_) => return UpdateState { auto_check: true, ..Default::default() },
     };
     if let Ok(b) = std::fs::read(&p) {
         if let Ok(s) = serde_json::from_slice(&b) {
             return s;
         }
     }
-    UpdateState::default()
+    UpdateState { auto_check: true, ..Default::default() }
 }
 
 /// 保存本地更新状态
@@ -135,9 +158,9 @@ pub fn save_update_state(state: &UpdateState) -> Result<()> {
         let _ = std::fs::create_dir_all(dir);
     }
     let b = serde_json::to_vec_pretty(state)?;
-    let tmp = p.with_extension("json.tmp");
+    let tmp = p.with_extension(format!("{}.tmp", std::process::id()));
     std::fs::write(&tmp, b)?;
-    let _ = std::fs::rename(tmp, p);
+    std::fs::rename(tmp, p)?;
     Ok(())
 }
 
@@ -163,6 +186,7 @@ pub fn fetch_latest_release(repo: &str) -> Result<ReleaseInfo> {
 /// - 若 `force == false`，则检查是否满足 24 小时间隔；若不满足，直接复用已缓存状态，不发网络请求。
 /// - 若满足间隔或 `force == true`，发起网络请求并更新持久化时间戳。
 pub fn check_update(current_version: &str, force: bool) -> Result<UpdateCheckResult> {
+    let _guard = CHECK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut state = load_update_state();
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -170,27 +194,21 @@ pub fn check_update(current_version: &str, force: bool) -> Result<UpdateCheckRes
         .unwrap_or(0);
 
     // 24小时节流过滤（非强制检查且未满 24 小时且已有缓存）
-    if !force && !should_check(state.last_check_at, now, CHECK_INTERVAL_SECS) && !state.latest_version.is_empty() {
-        let has_update = is_newer(&state.latest_version, current_version);
-        return Ok(UpdateCheckResult {
-            has_update,
-            current_version: current_version.to_string(),
-            latest_version: state.latest_version.clone(),
-            release_url: state.release_url.clone(),
-            release_notes: state.release_notes.clone(),
-            last_check_at: state.last_check_at,
-        });
+    if !force && (!state.auto_check || !should_check(state.last_check_at, now, CHECK_INTERVAL_SECS)) {
+        return Ok(cached_result(current_version, &state));
     }
 
     // 触发网络拉取
     let release = fetch_latest_release(DEFAULT_REPO)?;
+    if force { state.ignored_version = None; }
     state.last_check_at = now;
     state.latest_version = release.tag_name.clone();
     state.release_url = release.html_url.clone();
     state.release_notes = release.body.clone().unwrap_or_default();
-    let _ = save_update_state(&state);
+    save_update_state(&state)?;
 
-    let has_update = is_newer(&release.tag_name, current_version);
+    let has_update = is_newer(&release.tag_name, current_version)
+        && (force || state.ignored_version.as_deref() != Some(release.tag_name.as_str()));
     Ok(UpdateCheckResult {
         has_update,
         current_version: current_version.to_string(),
@@ -199,6 +217,98 @@ pub fn check_update(current_version: &str, force: bool) -> Result<UpdateCheckRes
         release_notes: release.body.unwrap_or_default(),
         last_check_at: now,
     })
+}
+
+pub fn cached_result(current: &str, state: &UpdateState) -> UpdateCheckResult {
+    UpdateCheckResult {
+        has_update: is_newer(&state.latest_version, current)
+            && state.ignored_version.as_deref() != Some(state.latest_version.as_str()),
+        current_version: current.into(), latest_version: state.latest_version.clone(),
+        release_url: state.release_url.clone(), release_notes: state.release_notes.clone(),
+        last_check_at: state.last_check_at,
+    }
+}
+
+pub fn remember_release(release: &ReleaseInfo) -> Result<()> {
+    let _guard = CHECK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = load_update_state();
+    state.last_check_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    state.latest_version = release.tag_name.clone();
+    state.release_url = release.html_url.clone();
+    state.release_notes = release.body.clone().unwrap_or_default();
+    save_update_state(&state)
+}
+
+pub fn set_preferences(auto_check: Option<bool>, ignored: Option<String>) -> Result<()> {
+    let _guard = CHECK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = load_update_state();
+    if let Some(value) = auto_check { state.auto_check = value; }
+    if let Some(value) = ignored { state.ignored_version = Some(value); }
+    save_update_state(&state)
+}
+
+/// Prefer the digest returned by GitHub; older releases may supply SHA256SUMS.
+pub fn asset_checksum(release: &ReleaseInfo, asset: &ReleaseAsset) -> Result<String> {
+    if let Some(digest) = asset.digest.as_deref().and_then(|s| s.strip_prefix("sha256:")) {
+        if valid_checksum(digest) { return Ok(digest.to_lowercase()); }
+    }
+    let manifest = release.assets.iter().find(|a| a.name == "SHA256SUMS")
+        .ok_or_else(|| Error::Msg("此版本没有下载校验信息，请通过发布页手动安装".into()))?;
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(20))
+        .user_agent("ysync-updater").build()?;
+    let body = client.get(&manifest.browser_download_url).send()?.error_for_status()?.text()?;
+    checksum_from_manifest(&body, &asset.name)
+        .ok_or_else(|| Error::Msg(format!("SHA256SUMS 未包含 {} 的有效校验值", asset.name)))
+}
+
+fn valid_checksum(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+pub fn checksum_from_manifest(body: &str, filename: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let (hash, name) = line.split_once(char::is_whitespace)?;
+        let name = name.trim_start().trim_start_matches('*');
+        (valid_checksum(hash) && name == filename).then(|| hash.to_lowercase())
+    })
+}
+
+pub fn download_verified(
+    asset: &ReleaseAsset, expected: &str, target: &Path,
+    mut progress: impl FnMut(u64, u64),
+) -> Result<()> {
+    if !valid_checksum(expected) { return Err(Error::Msg("无效的 SHA256 校验值".into())); }
+    let client = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(600))
+        .user_agent("ysync-updater").build()?;
+    let mut response = client.get(&asset.browser_download_url).send()?.error_for_status()?;
+    let total = response.content_length().unwrap_or(asset.size);
+    let parent = target.parent().ok_or_else(|| Error::Msg("无效的下载目录".into()))?;
+    std::fs::create_dir_all(parent)?;
+    let temp = target.with_extension("part");
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::File::create(&temp)?;
+        let mut hasher = Sha256::new();
+        let mut downloaded = 0;
+        let mut buf = [0u8; 64 * 1024];
+        loop {
+            let n = response.read(&mut buf)?;
+            if n == 0 { break; }
+            file.write_all(&buf[..n])?;
+            hasher.update(&buf[..n]);
+            downloaded += n as u64;
+            progress(downloaded, total);
+        }
+        if (asset.size > 0 && downloaded != asset.size) || (total > 0 && downloaded != total) {
+            return Err(Error::Msg("下载文件长度不匹配".into()));
+        }
+        let got = format!("{:x}", hasher.finalize());
+        if !got.eq_ignore_ascii_case(expected) { return Err(Error::Msg("下载文件 SHA256 校验失败".into())); }
+        file.sync_all()?;
+        std::fs::rename(&temp, target)?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    result
 }
 
 /// 流式下载 URL 内容并写入目标文件
@@ -245,94 +355,29 @@ pub fn find_macos_dmg_asset<'a>(assets: &'a [ReleaseAsset], arch: &str) -> Optio
         _ => "aarch64",
     };
     assets.iter().find(|it| it.name.ends_with(".dmg") && it.name.contains(a))
-        .or_else(|| assets.iter().find(|it| it.name.ends_with(".dmg")))
+        .or_else(|| assets.iter().find(|it| it.name.ends_with(".dmg") && it.name.contains("universal")))
 }
 
 /// 自更新当前运行的可执行文件（CLI / ysync）
-pub fn update_current_binary(asset_url: &str) -> Result<()> {
-    let current_exe = std::env::current_exe().map_err(|e| Error::Msg(format!("获取当前程序路径失败: {e}")))?;
-    let tmp_file = std::env::temp_dir().join(format!("ysync_new_{}", std::process::id()));
-
-    download_file(asset_url, &tmp_file)?;
-
+pub fn update_current_binary(asset: &ReleaseAsset, checksum: &str) -> Result<()> {
+    let current = std::env::current_exe()?;
+    let staged = current.with_file_name(format!(".ysync-new-{}", crate::update_install::nonce()));
+    download_verified(asset, checksum, &staged, |_, _| {})?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&tmp_file)?.permissions();
-        perms.set_mode(0o755);
-        let _ = std::fs::set_permissions(&tmp_file, perms);
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
     }
-
-    let old_backup = current_exe.with_extension("old");
-    let _ = std::fs::remove_file(&old_backup);
-    if let Err(e) = std::fs::rename(&current_exe, &old_backup) {
-        let _ = std::fs::remove_file(&tmp_file);
-        return Err(Error::Msg(format!("写入目标目录失败（可能需要管理员权限）: {e}")));
-    }
-    if let Err(e) = std::fs::rename(&tmp_file, &current_exe) {
-        let _ = std::fs::rename(&old_backup, &current_exe);
-        let _ = std::fs::remove_file(&tmp_file);
-        return Err(Error::Msg(format!("更新新版本二进制失败: {e}")));
-    }
-    let _ = std::fs::remove_file(&old_backup);
-    Ok(())
+    let backup = current.with_file_name(format!(".ysync-old-{}", crate::update_install::nonce()));
+    crate::update_install::atomic_replace(&staged, &current, &backup)
 }
 
-/// 在 macOS 下将下载的 DMG 包挂载并覆盖安装到 /Applications/y-sync.app
 #[cfg(target_os = "macos")]
 pub fn install_macos_desktop_dmg(dmg_path: &Path) -> Result<()> {
-    let pid = std::process::id();
-    let mount_dir = std::env::temp_dir().join(format!("y-sync-mnt-{pid}"));
-    let _ = std::fs::create_dir_all(&mount_dir);
-
-    let attach_out = std::process::Command::new("hdiutil")
-        .args([
-            "attach",
-            dmg_path.to_str().unwrap_or_default(),
-            "-nobrowse",
-            "-mountpoint",
-            mount_dir.to_str().unwrap_or_default(),
-        ])
-        .output()
-        .map_err(|e| Error::Msg(format!("挂载 DMG 失败: {e}")))?;
-    if !attach_out.status.success() {
-        let err = String::from_utf8_lossy(&attach_out.stderr);
-        return Err(Error::Msg(format!("hdiutil attach 失败: {err}")));
-    }
-
-    let src_app = mount_dir.join("y-sync.app");
-    let dst_app = Path::new("/Applications/y-sync.app");
-    if !src_app.exists() {
-        let _ = std::process::Command::new("hdiutil")
-            .args(["detach", mount_dir.to_str().unwrap_or_default()])
-            .output();
-        let _ = std::fs::remove_dir_all(&mount_dir);
-        return Err(Error::Msg("DMG 内未找到 y-sync.app".into()));
-    }
-
-    if dst_app.exists() {
-        let _ = std::fs::remove_dir_all(dst_app);
-    }
-    let cp_res = std::process::Command::new("cp")
-        .args(["-R", src_app.to_str().unwrap_or_default(), "/Applications/"])
-        .output();
-    let _ = std::process::Command::new("xattr")
-        .args(["-rd", "com.apple.quarantine", "/Applications/y-sync.app"])
-        .output();
-
-    let _ = std::process::Command::new("hdiutil")
-        .args(["detach", mount_dir.to_str().unwrap_or_default()])
-        .output();
-    let _ = std::fs::remove_dir_all(&mount_dir);
-
-    match cp_res {
-        Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => {
-            let err = String::from_utf8_lossy(&out.stderr);
-            Err(Error::Msg(format!("拷贝应用至 /Applications 失败: {err}")))
-        }
-        Err(e) => Err(Error::Msg(format!("执行 cp 失败: {e}"))),
-    }
+    let target = Path::new("/Applications/y-sync.app");
+    let staged = crate::update_install::prepare_macos_app(dmg_path, target)?;
+    let backup = target.with_file_name(format!(".y-sync-backup-{}.app", crate::update_install::nonce()));
+    crate::update_install::atomic_replace(&staged, target, &backup)
 }
 
 #[cfg(test)]
@@ -346,7 +391,7 @@ mod tests {
         assert_eq!(compare_version("0.8.10", "0.8.2"), Ordering::Greater);
         assert_eq!(compare_version("v1.0.0", "v0.9.9"), Ordering::Greater);
         assert_eq!(compare_version("v0.7.8", "v0.8.0"), Ordering::Less);
-        assert_eq!(compare_version("0.8.0-beta.1", "0.8.0"), Ordering::Equal);
+        assert_eq!(compare_version("0.8.0-beta.1", "0.8.0"), Ordering::Less);
     }
 
     #[test]
@@ -365,6 +410,21 @@ mod tests {
         assert!(!should_check(now - 1000, now, 86400));
         assert!(should_check(now - 86400, now, 86400));
         assert!(should_check(now - 90000, now, 86400));
+    }
+
+    #[test]
+    fn prerelease_build_and_skip_preferences() {
+        assert_eq!(compare_version("1.0.0-beta.2", "1.0.0-beta.10"), Ordering::Less);
+        assert_eq!(compare_version("1.0.0+build.2", "1.0.0+build.1"), Ordering::Equal);
+        let mut state: UpdateState = serde_json::from_str(r#"{"latest_version":"v2.0.0"}"#).unwrap();
+        assert!(state.auto_check);
+        assert!(cached_result("1.0.0", &state).has_update);
+        state.ignored_version = Some("v2.0.0".into());
+        assert!(!cached_result("1.0.0", &state).has_update);
+        state.latest_version = "v2.1.0".into();
+        assert!(cached_result("1.0.0", &state).has_update);
+        let arm_only = vec![ReleaseAsset { name: "y-sync_1.0.0_aarch64.dmg".into(), ..Default::default() }];
+        assert!(find_macos_dmg_asset(&arm_only, "x86_64").is_none());
     }
 
     #[test]

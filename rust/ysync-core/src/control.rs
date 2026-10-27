@@ -62,6 +62,10 @@ impl ControlClient {
         Ok(self.get_json::<StatusResp>("/status")?.folders_or_empty())
     }
 
+    pub fn update_status(&self) -> Result<serde_json::Value> { self.get_json("/update/status") }
+    pub fn check_updates(&self) -> Result<String> { self.post_json("/update/check", json!({})) }
+    pub fn apply_update(&self) -> Result<String> { self.post_json("/update/apply", json!({})) }
+
     pub fn conflicts(&self) -> Result<Vec<Conflict>> {
         #[derive(Deserialize)]
         struct R {

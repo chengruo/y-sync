@@ -170,7 +170,9 @@ ysync versions list my-project src/main.rs # 查看指定文件的历史覆盖�
 ysync share my-project docs -hours 72      # 生成对外分享链接
 ```
 
-> 💡 **自动更新机制**：桌面客户端（`y-sync.app`）与后台守护进程默认每 24 小时自动检查一次 GitHub Release 新版本。发现新版本时托盘菜单会标红提醒、控制中心顶部展示更新横幅，点击即可一键无感升级。
+> 💡 **客户端自动更新**：守护进程在启动后检查版本，成功检查后每 24 小时再次检查 GitHub Release；桌面端与管理台共用检查结果。可从托盘或管理台“检查更新”查看版本、更新说明和下载进度，也可关闭自动检查或跳过某个版本。点击“下载并重新启动”后，后台任务校验 SHA256，等待当前同步结束，再安装并重新启动 macOS 应用及随包守护进程；新守护进程健康检查失败时恢复旧版本。Unix CLI 守护也支持自动重新启动，Windows CLI 安装后需手动重新启动。配置和同步数据保留。
+>
+> 发布流程会生成 `SHA256SUMS` 并为桌面壳和 sidecar 注入同一版本号。更新仅安装更高版本和匹配架构的包；缺少有效校验信息的旧发布包需通过发布页手动安装。更新备份和 `update.log` 可用于排障。
 
 ---
 
@@ -264,6 +266,7 @@ cargo test                   # 运行单元测试与属性测试（100% Rust 实
 bash scripts/e2e.sh          # 76 项端到端断言测试（同步/冲突/移动/回收站/版本/分块/崩溃恢复）
 bash scripts/e2e-stress.sh   # 30 项高压稳定性测试（真实 kill -9、WS 频繁断连、百级并发互斥）
 bash scripts/e2e-features.sh # 14 项安全特性测试（设备吊销、防爆破退避、配额校验、审计日志）
+python3 scripts/e2e-updater.py # 隔离验证更新接口、重启与失败回滚（先构建 Rust debug 客户端）
 python3 scripts/e2e-project-selection.py # 远端项目选择、账号隔离、独立同步和双向合并（先构建 Rust debug 二进制）
 bash scripts/chaos.sh 8       # 混沌工程长跑（随机文件变动 + 随机击杀，逐字节校验最终一致性）
 bash scripts/bench.sh 100000 # 规模基准压测（10 万文件索引与传播性能）

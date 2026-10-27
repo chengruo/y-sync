@@ -4,6 +4,7 @@ pub mod config;
 pub mod control;
 pub mod protocol;
 pub mod updater;
+pub mod update_install;
 
 pub use config::{
     clear_daemon_info, config_dir, config_path, default_device_name, is_sub_path, load_config,

@@ -357,73 +357,29 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
             }
         }
         (Method::Get, "/update/status") => {
-            let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
-            let res = ysync_core::updater::check_update(build, false).unwrap_or_else(|_| {
-                let st = ysync_core::updater::load_update_state();
-                ysync_core::updater::UpdateCheckResult {
-                    has_update: ysync_core::updater::is_newer(&st.latest_version, build),
-                    current_version: build.to_string(),
-                    latest_version: st.latest_version,
-                    release_url: st.release_url,
-                    release_notes: st.release_notes,
-                    last_check_at: st.last_check_at,
-                }
-            });
-            respond(request, 200, &serde_json::to_string(&res).unwrap(), "application/json");
+            respond(request, 200, &crate::update::service().status().to_string(), "application/json");
         }
-        (Method::Post, "/update/check") => {
-            let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
-            match ysync_core::updater::check_update(build, true) {
-                Ok(res) => respond(request, 200, &serde_json::to_string(&res).unwrap(), "application/json"),
-                Err(e) => respond(request, 500, &format!("{{\"error\":\"{e}\"}}"), "application/json"),
+        (Method::Post, "/update/check") | (Method::Post, "/update/apply") => {
+            let updater = crate::update::service();
+            let result = if path == "/update/check" { updater.check(true) } else { updater.apply(daemon.clone()) };
+            match result {
+                Ok(()) => respond(request, 202, "{\"ok\":true}", "application/json"),
+                Err(e) => respond(request, 409, &serde_json::json!({ "ok": false, "error": e.to_string() }).to_string(), "application/json"),
             }
         }
-        (Method::Post, "/update/apply") => {
-            let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
-            match perform_update_apply(build) {
-                Ok(msg) => respond(request, 200, &serde_json::json!({ "ok": true, "message": msg }).to_string(), "application/json"),
-                Err(e) => respond(request, 500, &serde_json::json!({ "ok": false, "error": e }).to_string(), "application/json"),
+        (Method::Post, "/update/preferences") => {
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            let auto_check = v.get("auto_check").and_then(|v| v.as_bool());
+            let ignored = if v.get("skip_version").and_then(|v| v.as_bool()) == Some(true) {
+                Some(ysync_core::updater::load_update_state().latest_version)
+            } else { None };
+            match ysync_core::updater::set_preferences(auto_check, ignored) {
+                Ok(()) => respond(request, 200, "{\"ok\":true}", "application/json"),
+                Err(e) => respond(request, 500, &serde_json::json!({ "error": e.to_string() }).to_string(), "application/json"),
             }
         }
         _ => respond(request, 404, "not found", "text/plain"),
     }
-}
-
-fn perform_update_apply(_build: &str) -> std::result::Result<String, String> {
-    let release = ysync_core::updater::fetch_latest_release(ysync_core::updater::DEFAULT_REPO)
-        .map_err(|e| format!("获取最新 Release 失败: {e}"))?;
-
-    let arch = std::env::consts::ARCH;
-
-    #[cfg(target_os = "macos")]
-    {
-        let desktop_app = std::path::Path::new("/Applications/y-sync.app");
-        if desktop_app.exists() {
-            if let Some(dmg_asset) = ysync_core::updater::find_macos_dmg_asset(&release.assets, arch) {
-                let tmp_dmg = std::env::temp_dir().join(format!("ysync_{}.dmg", release.tag_name));
-                ysync_core::updater::download_file(&dmg_asset.browser_download_url, &tmp_dmg)
-                    .map_err(|e| format!("下载桌面安装包失败: {e}"))?;
-                ysync_core::updater::install_macos_desktop_dmg(&tmp_dmg)
-                    .map_err(|e| format!("安装桌面包失败: {e}"))?;
-                let _ = std::fs::remove_file(&tmp_dmg);
-                return Ok(format!("桌面端已成功更新至 {}，重启应用即可生效！", release.tag_name));
-            }
-        }
-    }
-
-    let os = std::env::consts::OS;
-    let asset_name = ysync_core::updater::find_cli_asset_name(os, arch)
-        .ok_or_else(|| format!("未找到适用于 {os}-{arch} 的构建资产"))?;
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .ok_or_else(|| format!("Release 资产中未包含 {asset_name}"))?;
-
-    ysync_core::updater::update_current_binary(&asset.browser_download_url)
-        .map_err(|e| format!("更新二进制失败: {e}"))?;
-
-    Ok(format!("客户端已成功更新至 {}！", release.tag_name))
 }
 
 fn reveal_path(path: &str) {

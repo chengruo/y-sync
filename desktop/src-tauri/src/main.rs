@@ -136,6 +136,10 @@ fn pick_icon(status: Option<&[ysync_core::protocol::FolderStatus]>) -> &'static 
 }
 
 fn show_manager(app: &AppHandle) -> tauri::Result<()> {
+    show_manager_section(app, false)
+}
+
+fn show_manager_section(app: &AppHandle, updates: bool) -> tauri::Result<()> {
     if connect().is_none() {
         ensure_daemon();
     }
@@ -165,10 +169,12 @@ fn show_manager(app: &AppHandle) -> tauri::Result<()> {
         });
         return Ok(());
     };
-    let url = manager_url(&d)
+    let mut url = manager_url(&d)
         .parse::<tauri::Url>()
         .expect("daemon url");
+    if updates { url.set_fragment(Some("updates")); }
     if let Some(w) = app.get_webview_window("manager") {
+        if updates { w.navigate(url)?; }
         // macOS：最小化的窗口仅 set_focus 不会还原，需先解除最小化
         let _ = w.unminimize();
         let _ = w.show();
@@ -251,7 +257,10 @@ fn main() {
                     }
                     let Some(d) = connect() else { return };
                     let r = match event.id().as_ref() {
-                        "open" | "update" => show_manager(app).map_err(|e| e.to_string()),
+                        "open" => show_manager(app).map_err(|e| e.to_string()),
+                        "update" => {
+                            show_manager_section(app, true).map_err(|e| e.to_string())
+                        }
                         "sync" => d.client.trigger_sync(None).map_err(|e| e.to_string()),
                         "pause" => d.client.pause("").map_err(|e| e.to_string()),
                         "resume" => d.client.resume("").map_err(|e| e.to_string()),
@@ -278,16 +287,17 @@ fn main() {
             let update_item = update_i.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(10));
-                let build = option_env!("Y_SYNC_VERSION").unwrap_or("dev");
                 loop {
-                    if let Ok(res) = ysync_core::updater::check_update(build, false) {
-                        if res.has_update {
-                            let _ = update_item.set_text(format!("✨ 发现新版本 {} (点击查看)", res.latest_version));
+                    if let Some(d) = connect() {
+                      if let Ok(res) = d.client.update_status() {
+                        if res["has_update"].as_bool() == Some(true) {
+                            let _ = update_item.set_text(format!("发现新版本 {} (点击查看)", res["latest_version"].as_str().unwrap_or("")));
                         } else {
                             let _ = update_item.set_text("检查更新…");
                         }
+                      }
                     }
-                    std::thread::sleep(Duration::from_secs(3600));
+                    std::thread::sleep(Duration::from_secs(60));
                 }
             });
 
