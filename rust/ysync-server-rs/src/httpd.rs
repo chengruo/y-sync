@@ -621,6 +621,12 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
         };
 
         match (m, p) {
+            ("GET", "/api/v1/projects") => {
+                return match state.store.projects(uid) {
+                    Ok(projects) => ok_json(serde_json::json!({ "projects": projects })),
+                    Err(e) => err_json(500, &e),
+                };
+            }
             ("GET", "/api/v1/nodes") => {
                 // P0-1：带 limit 参数走分页（has_more + after 游标）；不带则全量（兼容）
                 let limit: i64 = match req.q("limit") {
@@ -629,7 +635,8 @@ fn route(state: &ServerState, req: &Request) -> RouteResult {
                 };
                 if limit > 0 {
                     let after: i64 = req.q("after").and_then(|v| v.parse().ok()).unwrap_or(0);
-                    return match state.store.nodes_paged(uid, after, limit) {
+                    let root = req.q("root").and_then(|v| v.parse().ok()).unwrap_or(0);
+                    return match state.store.nodes_paged(uid, after, limit, root) {
                         Ok((nodes, has_more)) => ok_json(
                             serde_json::json!({ "nodes": nodes, "has_more": has_more }),
                         ),

@@ -23,6 +23,7 @@ pub struct FolderStatus {
     pub conflicts_total: i64,
     #[serde(rename = "paused")]
     pub paused: bool,
+    pub syncing: bool,
     #[serde(rename = "last_stats")]
     pub last_stats: String,
 }
@@ -204,6 +205,9 @@ impl DaemonState {
     pub fn snapshot(&self) -> Vec<FolderStatus> {
         let g = self.inner.lock().unwrap();
         let mut out: Vec<FolderStatus> = g.status.values().cloned().collect();
+        for s in &mut out {
+            s.syncing = g.syncing.contains(&s.name);
+        }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }

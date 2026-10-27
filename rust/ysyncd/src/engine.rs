@@ -298,7 +298,7 @@ impl Engine {
     }
 
     fn resolve_root(&self, f: &mut FolderCfg) -> Result<i64, ysync_core::Error> {
-        let nodes = self.with_api(|a| a.nodes())?;
+        let nodes = self.with_api(|a| a.projects())?;
         for n in &nodes {
             if n.path == f.name && n.kind == protocol::TYPE_DIR {
                 return Ok(n.id);
@@ -430,11 +430,17 @@ impl Engine {
         let new_cursor;
 
         if f.cursor == 0 {
+            // 先取日志位置：分页期间发生的变更留给下一轮增量处理，避免跳过。
+            new_cursor = self.with_api(|a| a.head())?.cursor;
             // 初次同步：P0-1 按 id 分页拉取，免大树单响应尖峰
             let mut after_id = 0i64;
             loop {
-                let (page, has_more) = self.with_api(|a| a.nodes_paged(after_id, 5000))?;
+                let previous_id = after_id;
+                let (page, has_more) = self.with_api(|a| a.nodes_paged(after_id, 5000, f.root_node_id))?;
                 if page.is_empty() {
+                    if has_more {
+                        return Err(ysync_core::Error::Msg("节点分页返回空页但仍有后续页".into()));
+                    }
                     break;
                 }
                 for n in page {
@@ -454,8 +460,10 @@ impl Engine {
                 if !has_more {
                     break;
                 }
+                if after_id <= previous_id {
+                    return Err(ysync_core::Error::Msg("节点分页游标未推进".into()));
+                }
             }
-            new_cursor = self.with_api(|a| a.head())?.cursor;
         } else {
             for (rel, r) in &baseline {
                 server_now.insert(
@@ -1327,13 +1335,17 @@ impl Engine {
     /// 把游标/根节点写回共享配置并持久化（Go 版 SaveConfig(e.Cfg) 对应）。
     fn persist_folder(&self, f: &FolderCfg) -> Result<(), ysync_core::Error> {
         crate::ctx::with_cfg(|c| {
-            if let Some(x) = c.folders.iter_mut().find(|x| x.name == f.name) {
+            let before = c.clone();
+            if let Some(x) = c.folders.iter_mut().find(|x| x.name == f.name && Path::new(&x.local_path) == f.local_path) {
                 x.cursor = f.cursor;
                 x.root_node_id = f.root_node_id;
             }
-        });
-        crate::ctx::save();
-        Ok(())
+            if let Err(e) = ysync_core::save_config(c) {
+                *c = before;
+                return Err(e);
+            }
+            Ok(())
+        })
     }
     fn own_device_id(&self) -> i64 {
         crate::ctx::device_id()

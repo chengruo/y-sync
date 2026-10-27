@@ -854,6 +854,7 @@ body {
       <span>全部同步</span>
     </button>
 
+    <button class="btn btn-sm" onclick="openRemoteFoldersModal()">从服务器选择</button>
     <button class="btn btn-primary btn-sm" onclick="openAddFolderModal()">
       <svg style="width:13px;height:13px;" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
       <span>添加文件夹</span>
@@ -1131,6 +1132,34 @@ body {
   </main>
 </div>
 
+<!-- 模态弹窗：选择远端项目 -->
+<div class="modal-overlay" id="remote-modal">
+  <div class="modal-window">
+    <div class="modal-header">
+      <h3>选择服务器上的项目</h3>
+      <button class="modal-close-btn" onclick="closeRemoteFoldersModal()">✕</button>
+    </div>
+    <div class="modal-body" style="max-height:65vh;overflow:auto;">
+      <div class="form-field">
+        <label for="remote-parent">保存到本地父目录</label>
+        <div style="display:flex;gap:8px;">
+          <input id="remote-parent" style="flex:1;" placeholder="/Users/me/Sync" oninput="updateRemotePaths()">
+          <button class="btn btn-sm" onclick="pickRemoteParent()">浏览…</button>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--text-secondary);">每个项目保存到下方预览的目录。已有文件会双向合并；同名内容冲突时保留冲突副本。</p>
+      <div id="remote-project-list" aria-live="polite"></div>
+      <p id="remote-error" role="alert" style="font-size:12px;color:var(--err);white-space:pre-wrap;"></p>
+      <p style="font-size:12px;color:var(--text-secondary);">已接入的项目无需重复选择。停止同步可在主界面选择“移除”，本地和远端文件均保留。</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" id="remote-reload" onclick="loadRemoteFolders()">刷新列表</button>
+      <button class="btn btn-sm" onclick="closeRemoteFoldersModal()">关闭</button>
+      <button class="btn btn-primary btn-sm" id="remote-submit" onclick="subscribeRemoteFolders()" disabled>接入所选项目并同步</button>
+    </div>
+  </div>
+</div>
+
 <!-- 模态弹窗：接入新文件夹 -->
 <div class="modal-overlay" id="add-modal">
   <div class="modal-window">
@@ -1224,6 +1253,130 @@ let CURRENT_DEVICE_NAME = "";
 let CURRENT_FOLDERS = [];
 let ACTIVE_SECTION = "folders";
 let FILTER_KEYWORD = "";
+let REMOTE_PROJECTS = [];
+let REMOTE_BUSY = false;
+
+async function openRemoteFoldersModal() {
+  document.getElementById("remote-modal").classList.add("show");
+  await loadRemoteFolders();
+}
+function closeRemoteFoldersModal() {
+  if (!REMOTE_BUSY) document.getElementById("remote-modal").classList.remove("show");
+}
+function remoteProjectPath(project) {
+  const parent = document.getElementById("remote-parent").value.trim().replace(/[\\/]+$/, "");
+  return parent + "/" + project.name;
+}
+function updateRemotePaths() {
+  document.querySelectorAll("[data-remote-path]").forEach(el => {
+    const project = REMOTE_PROJECTS.find(p => String(p.id) === el.dataset.remotePath);
+    if (project) el.textContent = project.local_path || remoteProjectPath(project);
+  });
+}
+function updateRemoteSubmit() {
+  document.getElementById("remote-submit").disabled = REMOTE_BUSY ||
+    !document.querySelector("#remote-project-list input:checked");
+}
+function renderRemoteFolders() {
+  const list = document.getElementById("remote-project-list");
+  list.replaceChildren();
+  if (!REMOTE_PROJECTS.length) {
+    list.textContent = "服务器上暂无可同步项目。可以用“添加文件夹”上传第一个项目。";
+  }
+  for (const project of REMOTE_PROJECTS) {
+    const row = document.createElement("label");
+    row.style.cssText = "display:flex;gap:10px;padding:12px 0;border-bottom:1px solid var(--border);align-items:flex-start;";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = String(project.id);
+    checkbox.disabled = project.subscribed || REMOTE_BUSY;
+    checkbox.addEventListener("change", updateRemoteSubmit);
+    const details = document.createElement("div");
+    details.style.minWidth = "0";
+    const title = document.createElement("div");
+    title.textContent = project.name + (project.subscribed ? " · 已接入" : " · 未同步");
+    const path = document.createElement("div");
+    path.dataset.remotePath = String(project.id);
+    path.style.cssText = "font-size:12px;color:var(--text-secondary);overflow-wrap:anywhere;";
+    details.append(title, path);
+    row.append(checkbox, details);
+    list.append(row);
+  }
+  updateRemotePaths();
+  updateRemoteSubmit();
+}
+async function loadRemoteFolders() {
+  if (REMOTE_BUSY) return;
+  REMOTE_BUSY = true;
+  document.getElementById("remote-submit").disabled = true;
+  document.getElementById("remote-reload").disabled = true;
+  document.getElementById("remote-error").textContent = "";
+  document.getElementById("remote-project-list").textContent = "正在读取项目列表…";
+  REMOTE_PROJECTS = [];
+  try {
+    const r = await F("/remote-folders");
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    REMOTE_PROJECTS = data.projects || [];
+    if (!document.getElementById("remote-parent").value) {
+      document.getElementById("remote-parent").value = data.default_parent || "";
+    }
+  } catch (e) {
+    document.getElementById("remote-error").textContent = "读取失败：" + e.message;
+  } finally {
+    REMOTE_BUSY = false;
+    document.getElementById("remote-reload").disabled = false;
+    renderRemoteFolders();
+  }
+}
+async function pickRemoteParent() {
+  if (REMOTE_BUSY) return;
+  try {
+    const r = await F("/choose-folder", { method: "POST", headers: H() });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    if (data.ok && data.path) {
+      document.getElementById("remote-parent").value = data.path;
+      updateRemotePaths();
+    }
+  } catch (e) { document.getElementById("remote-error").textContent = "选择目录失败，请手动填写：" + e.message; }
+}
+async function subscribeRemoteFolders() {
+  if (REMOTE_BUSY) return;
+  const selected = [...document.querySelectorAll("#remote-project-list input:checked")]
+    .map(el => REMOTE_PROJECTS.find(p => String(p.id) === el.value));
+  if (!selected.length) return;
+  if (!document.getElementById("remote-parent").value.trim()) {
+    document.getElementById("remote-error").textContent = "请先选择本地父目录";
+    return;
+  }
+  // 提交前固定路径，避免输入变化改变同一批项目的目标目录。
+  const pending = selected.map(p => ({ project: p, path: remoteProjectPath(p) }));
+  REMOTE_BUSY = true;
+  document.getElementById("remote-parent").disabled = true;
+  document.getElementById("remote-reload").disabled = true;
+  document.querySelectorAll("#remote-project-list input").forEach(el => el.disabled = true);
+  updateRemoteSubmit();
+  const errors = [];
+  let added = 0;
+  for (const { project, path } of pending) {
+    try {
+      const r = await F("/remote-folders/subscribe", { method: "POST", headers: H(),
+        body: JSON.stringify({ root_node_id: project.id, local_path: path }) });
+      if (!r.ok) throw new Error(await r.text());
+      project.subscribed = true;
+      project.local_path = path;
+      added++;
+    } catch (e) { errors.push(project.name + "：" + e.message); }
+  }
+  REMOTE_BUSY = false;
+  document.getElementById("remote-parent").disabled = false;
+  document.getElementById("remote-reload").disabled = false;
+  document.getElementById("remote-error").textContent = errors.join("\n");
+  renderRemoteFolders();
+  if (added) { msg(`已接入 ${added} 个项目，正在同步`, "ok"); refresh(); }
+  if (!errors.length) closeRemoteFoldersModal();
+}
 
 // 格式化函数
 function fmtBytes(n) {
@@ -1354,16 +1507,19 @@ function renderFolders(folders) {
     if (f.paused) {
       stateLabel = "已暂停";
       stateCls = "pill-badge";
+    } else if (f.syncing) {
+      stateLabel = f.cursor ? "正在同步" : "首次同步中";
+      stateCls = "accent";
+      isSyncing = true;
     } else if (f.last_error) {
       stateLabel = "同步异常: " + f.last_error;
       stateCls = "err";
     } else if (f.conflicts_total > 0) {
       stateLabel = f.conflicts_total + " 处冲突待处理";
       stateCls = "warn";
-    } else if (f.last_stats && (f.last_stats.includes("↑") || f.last_stats.includes("↓"))) {
-      stateLabel = "同步传输中: " + f.last_stats;
-      stateCls = "accent";
-      isSyncing = true;
+    } else if (!f.last_sync) {
+      stateLabel = "等待首次同步";
+      stateCls = "warn";
     }
 
     const lastTime = f.last_sync ? new Date(f.last_sync).toLocaleTimeString() : "未同步";
@@ -1699,6 +1855,7 @@ async function doReauth() {
     msg("凭证已更新，正在恢复同步", "ok");
     closeReauthModal();
     refresh();
+    await openRemoteFoldersModal();
   }
 }
 
@@ -1915,8 +2072,10 @@ async function doSetup() {
   });
   if (!r.ok) msg("初始化配置失败: " + await r.text(), "err");
   else {
-    msg("配置成功，正在启动同步", "ok");
+    msg("登录成功，请选择要同步的项目", "ok");
+    document.getElementById("s-pass").value = "";
     refresh();
+    await openRemoteFoldersModal();
   }
 }
 

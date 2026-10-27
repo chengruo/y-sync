@@ -111,6 +111,24 @@ fn handle(mut request: tiny_http::Request, token: &str, daemon: &Daemon) {
     let json_field_str = |field: &str| -> String { json_field(field) };
 
     match (&method, path.as_str()) {
+        (Method::Get, "/remote-folders") => {
+            match daemon.remote_folders() {
+                Ok(v) => respond(request, 200, &v.to_string(), "application/json"),
+                Err(e) => respond(request, 502, &e, "text/plain"),
+            }
+        }
+        (Method::Post, "/remote-folders/subscribe") => {
+            let root_id = json_num("root_node_id", &body);
+            let local_path = json_field_str("local_path");
+            match daemon.subscribe_remote(root_id, &local_path) {
+                Ok(()) => {
+                    let d = daemon.clone();
+                    std::thread::spawn(move || d.sync_all());
+                    respond(request, 200, "{\"ok\":true}", "application/json")
+                }
+                Err(e) => respond(request, 400, &e, "text/plain"),
+            }
+        }
         (Method::Get, "/status") => {
             let folders = daemon.state.snapshot();
             respond(

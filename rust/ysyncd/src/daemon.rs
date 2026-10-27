@@ -57,29 +57,9 @@ impl Daemon {
         self.state.init_folders(&ctx::snapshot().folders);
         // 热重载后同步 engine 连接参数（A7：server_url/token 变更即时生效）
         ctx::with_cfg(|c| self.engine.api.set_connection(&c.server_url, &c.token));
-        // 新增文件夹补挂 FS 监听（独立 watcher，事件并入同一防抖循环）
+        // 在同一持久 watcher 上追加项目，避免新增项目时丢掉已有监听。
         if let Some(tx) = self.watch_tx.lock().unwrap().clone() {
-            let folders = ctx::with_cfg(|c| c.folders.clone());
-            let mut watched = self.watched.lock().unwrap();
-            for f in &folders {
-                if watched.insert(f.local_path.clone()) {
-                    match crate::watcher::Watcher::new(tx.clone()) {
-                        Ok(mut w) => {
-                            if let Err(e) = w.add_recursive(std::path::Path::new(&f.local_path)) {
-                                self.log(format!(
-                                    "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
-                                    f.name
-                                ));
-                            }
-                            *self.watcher_slot.lock().unwrap() = Some(w);
-                        }
-                        Err(e) => self.log(format!(
-                            "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
-                            f.name
-                        )),
-                    }
-                }
-            }
+            self.attach_watcher(&tx);
         }
         let folders = ctx::with_cfg(|c| {
             c.folders
@@ -89,7 +69,11 @@ impl Daemon {
                 .collect::<Vec<_>>()
         });
         for f in folders {
-            self.sync_folder(&f);
+            // 先占用项目同步槽，再派发线程；重复通知不会创建同项目的重复任务。
+            if self.state.try_begin_sync(&f.name) {
+                let me = self.clone();
+                std::thread::spawn(move || me.sync_reserved(&f));
+            }
         }
     }
 
@@ -98,10 +82,19 @@ impl Daemon {
         if !self.state.try_begin_sync(&f.name) {
             return;
         }
+        self.sync_reserved(f);
+    }
+
+    fn sync_reserved(&self, f: &ysync_core::Folder) {
         let _sync_guard = SyncGuard {
             state: self.state.clone(),
             name: f.name.clone(),
         };
+        // 占槽后读取最新游标，避免排队时持有过期的配置快照。
+        let Some(f) = ctx::with_cfg(|c| c.folders.iter().find(|x| x.name == f.name).cloned()) else {
+            return;
+        };
+        let mut f = f;
         let mut fc = FolderCfg {
             name: f.name.clone(),
             local_path: std::path::PathBuf::from(&f.local_path),
@@ -117,7 +110,7 @@ impl Daemon {
                     "level=ERROR msg=\"sync failed\" folder={:?} err={e:?}",
                     f.name
                 ));
-                self.state.fail_sync(f, &format!("{e:?}"));
+                self.state.fail_sync(&f, &format!("{e:?}"));
                 return;
             }
         };
@@ -128,8 +121,9 @@ impl Daemon {
             ));
         }
         let files = files_tracked(&f.local_path);
+        f.cursor = fc.cursor;
         self.state.finish_sync(
-            f,
+            &f,
             files,
             &format!(
                 "↑{} ↓{} 移{} 删{}",
@@ -195,25 +189,30 @@ impl Daemon {
     }
 
     fn attach_watcher(&self, tx: &mpsc::Sender<String>) {
-        let mut slot = self.watcher_slot.lock().unwrap();
-        let mut w = match crate::watcher::Watcher::new(tx.clone()) {
-            Ok(w) => w,
-            Err(e) => {
-                self.log(format!("level=WARN msg=\"watcher 创建失败\" err={e:?}"));
-                return;
-            }
-        };
         let folders = ctx::with_cfg(|c| c.folders.clone());
-        for f in &folders {
-            if let Err(e) = w.add_recursive(std::path::Path::new(&f.local_path)) {
-                self.log(format!(
-                    "level=WARN msg=\"监听失败\" folder={:?} err={e:?}",
-                    f.name
-                ));
+        let mut slot = self.watcher_slot.lock().unwrap();
+        if slot.is_none() {
+            match crate::watcher::Watcher::new(tx.clone()) {
+                Ok(w) => *slot = Some(w),
+                Err(e) => {
+                    self.log(format!("level=WARN msg=\"watcher 创建失败\" err={e:?}"));
+                    return;
+                }
             }
         }
-        *slot = Some(w);
-        self.log("level=INFO msg=\"FS 事件监听已启用\"".into());
+        let w = slot.as_mut().unwrap();
+        let mut watched = self.watched.lock().unwrap();
+        for f in &folders {
+            if watched.contains(&f.local_path) {
+                continue;
+            }
+            match w.add_recursive(std::path::Path::new(&f.local_path)) {
+                Ok(()) => { watched.insert(f.local_path.clone()); }
+                Err(e) => self.log(format!(
+                    "level=WARN msg=\"监听失败\" folder={:?} err={e:?}", f.name
+                )),
+            }
+        }
     }
 
     // ---------- 服务端数据管理（P1：管理台代理服务端 API） ----------
@@ -296,6 +295,34 @@ impl Daemon {
 
     // ---------- 管理操作 ----------
 
+    pub fn remote_folders(&self) -> Result<serde_json::Value, String> {
+        let cfg = ctx::snapshot();
+        // 使用配置里的最新凭据，不依赖下一轮同步更新共享连接。
+        let api = crate::api::Api::new(&cfg.server_url, &cfg.token);
+        let projects = api.projects().map_err(|e| format!("读取远端项目失败：{e}"))?;
+        let projects: Vec<_> = projects.into_iter().map(|n| {
+            let local = cfg.folders.iter().find(|f| f.root_node_id == n.id || f.name == n.path);
+            serde_json::json!({ "id": n.id, "name": n.name,
+                "local_path": local.map(|f| f.local_path.as_str()), "subscribed": local.is_some() })
+        }).collect();
+        let default_parent = dirs::home_dir().map(|p| p.join("Sync").to_string_lossy().to_string()).unwrap_or_default();
+        Ok(serde_json::json!({ "projects": projects, "default_parent": default_parent }))
+    }
+
+    pub fn subscribe_remote(&self, root_id: i64, local_path: &str) -> Result<(), String> {
+        let cfg = ctx::snapshot();
+        let api = crate::api::Api::new(&cfg.server_url, &cfg.token);
+        let project = api.projects().map_err(|e| format!("读取远端项目失败：{e}"))?
+            .into_iter().find(|n| n.id == root_id)
+            .ok_or_else(|| "项目不存在或当前账号无权访问，请刷新列表".to_string())?;
+        // 项目名称必须是本地目录的单个组成部分，不能逃逸到父目录。
+        if project.path != project.name || project.name.contains(['/', '\\', ':'])
+            || project.name.chars().any(|c| c.is_control()) {
+            return Err("项目名称不能安全映射为本地目录".into());
+        }
+        self.add_folder_with_root(local_path, &project.name, &[], false, root_id)
+    }
+
     pub fn add_folder(
         &self,
         local_path: &str,
@@ -303,13 +330,24 @@ impl Daemon {
         excludes: &[String],
         use_gitignore: bool,
     ) -> Result<(), String> {
+        self.add_folder_with_root(local_path, name, excludes, use_gitignore, 0)
+    }
+
+    fn add_folder_with_root(
+        &self, local_path: &str, name: &str, excludes: &[String],
+        use_gitignore: bool, root_node_id: i64,
+    ) -> Result<(), String> {
         let abs = std::path::PathBuf::from(local_path);
+        if !abs.is_absolute() {
+            return Err("请选择本地目录的绝对路径".into());
+        }
         let abs = abs.canonicalize().unwrap_or(abs);
         if !abs.exists() {
             std::fs::create_dir_all(&abs).map_err(|e| format!("mkdir: {e}"))?;
         } else if !abs.is_dir() {
             return Err(format!("{} 不是目录", abs.display()));
         }
+        let abs = abs.canonicalize().map_err(|e| format!("读取本地目录失败：{e}"))?;
         let name = if name.is_empty() {
             abs.file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -321,42 +359,36 @@ impl Daemon {
             return Err(format!("非法的文件夹名 {name:?}"));
         }
         let abs_str = abs.to_string_lossy().to_string();
-        let nested_err: Option<String> = ctx::with_cfg(|c| {
+        ctx::with_cfg(|c| -> Result<(), String> {
             for f in &c.folders {
-                if f.name == name {
-                    return Some(format!("文件夹 {name:?} 已存在"));
+                if f.name == name || (root_node_id > 0 && f.root_node_id == root_node_id) {
+                    return Err(format!("文件夹 {name:?} 已存在"));
                 }
-                if ysync_core::is_sub_path(&f.local_path, &abs_str)
+                if std::path::Path::new(&f.local_path) == abs
+                    || ysync_core::is_sub_path(&f.local_path, &abs_str)
                     || ysync_core::is_sub_path(&abs_str, &f.local_path)
                 {
-                    return Some(format!(
+                    return Err(format!(
                         "文件夹不得嵌套或重叠（FR-S15）：{} 与 {}",
                         f.local_path,
                         abs.display()
                     ));
                 }
             }
-            None
-        });
-        if let Some(e) = nested_err {
-            return Err(e);
-        }
-        ctx::with_cfg(|c| {
             c.folders.push(ysync_core::Folder {
                 name: name.clone(),
                 local_path: abs_str.clone(),
-                root_node_id: 0,
+                root_node_id,
                 cursor: 0,
                 excludes: excludes.to_vec(),
                 use_gitignore,
             });
-        });
-        if let Err(e) = ctx::save_result() {
-            ctx::with_cfg(|c| {
-                c.folders.retain(|f| f.name != name);
-            });
-            return Err(format!("{e:?}"));
-        }
+            if let Err(e) = ysync_core::save_config(c) {
+                c.folders.pop();
+                return Err(format!("{e:?}"));
+            }
+            Ok(())
+        })?;
         self.state.init_folders(&ctx::snapshot().folders);
         self.log(format!(
             "level=INFO msg=\"folder added (via UI)\" name={name:?} local={:?}",

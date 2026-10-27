@@ -326,7 +326,19 @@ impl Api {
         self.get_content(mhash, dest, mtime_milli)
     }
 
-    pub fn nodes_paged(&self, after_id: i64, limit: i64) -> Result<(Vec<NodeInfo>, bool)> {
+    pub fn projects(&self) -> Result<Vec<NodeInfo>> {
+        #[derive(serde::Deserialize)]
+        struct R { projects: Vec<NodeInfo> }
+        let resp = self.req("GET", "/api/v1/projects", None).send()?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            // 旧服务端没有项目接口时保持兼容；升级后由服务端筛选，免全树传输。
+            return Ok(self.nodes()?.into_iter()
+                .filter(|n| n.parent_id == 0 && n.kind == "dir").collect());
+        }
+        Ok(check(resp)?.json::<R>()?.projects)
+    }
+
+    pub fn nodes_paged(&self, after_id: i64, limit: i64, root_id: i64) -> Result<(Vec<NodeInfo>, bool)> {
         #[derive(serde::Deserialize)]
         struct R {
             #[serde(rename = "nodes", deserialize_with = "null_to_vec", default)]
@@ -336,7 +348,7 @@ impl Api {
         }
         let resp = self.req(
             "GET",
-            &format!("/api/v1/nodes?after={after_id}&limit={limit}"),
+            &format!("/api/v1/nodes?after={after_id}&limit={limit}&root={root_id}"),
             None,
         )
         .send()?;

@@ -891,24 +891,49 @@ impl Store {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// 节点树分页列举（P0-1）：按 id 游标翻页，has_more 指示是否还有后续页。
+    /// 可同步项目：当前账号的顶层目录，避免登录后拉取整棵节点树。
+    pub fn projects(&self, user_id: i64) -> Result<Vec<NodeInfo>, String> {
+        let conn = self.db.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, path FROM nodes
+             WHERE user_id=?1 AND parent_id=0 AND type='dir' ORDER BY name, id",
+        ).map_err(to_serr)?;
+        let rows = stmt.query_map([user_id], |r| Ok(NodeInfo {
+            id: r.get(0)?, name: r.get(1)?, path: r.get(2)?,
+            kind: "dir".into(), ..Default::default()
+        })).map_err(to_serr)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(to_serr)
+    }
+
+    /// 按 id 分页；root_id=0 保持旧的全账号查询，非零只返回指定子树。
     pub fn nodes_paged(
         &self,
         user_id: i64,
         after_id: i64,
         limit: i64,
+        root_id: i64,
     ) -> Result<(Vec<NodeInfo>, bool), String> {
         let limit = if limit <= 0 || limit > 10_000 { 5_000 } else { limit };
         let conn = self.db.lock().unwrap();
+        let root = if root_id > 0 {
+            let n = Self::node_by_id(&conn, user_id, root_id)?;
+            if n.kind != "dir" { return Err("root must be a directory".into()); }
+            n.path
+        } else { String::new() };
+        let prefix = format!("{root}/");
+        // '/' 后的连续字典序范围 [root/, root0)，不把同名前缀的兄弟目录带入。
+        let upper = format!("{root}0");
         let mut stmt = conn
             .prepare(
                 "SELECT id, parent_id, name, type, path, size, mtime, content_hash
-                 FROM nodes WHERE user_id=?1 AND id>?2 ORDER BY id LIMIT ?3",
+                 FROM nodes WHERE user_id=?1 AND id>?2
+                 AND (?4='' OR path=?4 OR (path>=?5 AND path<?6))
+                 ORDER BY id LIMIT ?3",
             )
             .map_err(to_serr)?;
         let rows = stmt
             .query_map(
-                rusqlite::params![user_id, after_id, limit + 1],
+                rusqlite::params![user_id, after_id, limit + 1, root, prefix, upper],
                 |r| {
                     Ok(NodeInfo {
                         id: r.get(0)?,
@@ -1872,4 +1897,53 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    #[test]
+    fn project_listing_and_scoped_pagination_isolate_users_and_siblings() {
+        let dir = std::env::temp_dir().join(format!("ysync-projects-{}", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open(&dir).unwrap();
+            {
+                let conn = store.db.lock().unwrap();
+                for (id, uid, parent, path, kind) in [
+                    (1, 1, 0, "proj", "dir"),
+                    (2, 1, 1, "proj/child", "dir"),
+                    (3, 1, 1, "proj/中文", "file"),
+                    (4, 1, 0, "proj-extra", "dir"),
+                    (5, 1, 4, "proj-extra/child", "file"),
+                    (6, 2, 0, "private", "dir"),
+                    (7, 2, 6, "private/secret", "file"),
+                    (8, 1, 0, "top-file", "file"),
+                    (9, 1, 1, "proj/😀", "file"),
+                ] {
+                    conn.execute(
+                        "INSERT INTO nodes(id,user_id,parent_id,name,type,path) VALUES(?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![id, uid, parent, path.rsplit('/').next().unwrap(), kind, path],
+                    ).unwrap();
+                }
+            }
+            let projects = store.projects(1).unwrap();
+            assert_eq!(projects.iter().map(|p| p.path.as_str()).collect::<Vec<_>>(), ["proj", "proj-extra"]);
+            assert_eq!(store.projects(2).unwrap()[0].path, "private");
+            assert!(store.projects(99).unwrap().is_empty());
+            let (first, more) = store.nodes_paged(1, 0, 2, 1).unwrap();
+            assert!(more);
+            assert_eq!(first.iter().map(|n| n.id).collect::<Vec<_>>(), [1, 2]);
+            let (second, more) = store.nodes_paged(1, 2, 2, 1).unwrap();
+            assert!(!more);
+            assert_eq!(second.iter().map(|n| n.id).collect::<Vec<_>>(), [3, 9]);
+            assert!(store.nodes_paged(1, 9, 2, 1).unwrap().0.is_empty());
+            assert!(store.nodes_paged(1, 0, 2, 6).is_err(), "cannot query another user's root");
+            assert!(store.nodes_paged(1, 0, 2, 8).is_err(), "file cannot be a sync root");
+            let (all, more) = store.nodes_paged(1, 0, 100, 0).unwrap();
+            assert!(!more);
+            assert_eq!(all.len(), 7, "legacy unscoped API remains available");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

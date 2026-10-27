@@ -112,9 +112,12 @@ ssh_run "echo ok" >/dev/null
 
 # 1. 部署前数据快照（首次部署时服务未装，自动跳过）
 ssh_run "sudo mkdir -p /var/lib/y-sync/backups && \
-  (sudo env YSYNC_DATA=/var/lib/y-sync /opt/y-sync/current/y-sync-server-rs backup \
-     -out /var/lib/y-sync/backups/pre-$DEPLOY_VERSION-$(date +%Y%m%d%H%M%S) 2>/dev/null \
-   || echo '[warn] 服务尚未安装，跳过 backup（首次部署）')"
+  if [ -x /opt/y-sync/current/y-sync-server-rs ]; then \
+    sudo env YSYNC_DATA=/var/lib/y-sync /opt/y-sync/current/y-sync-server-rs backup \
+      -out /var/lib/y-sync/backups/pre-$DEPLOY_VERSION-$(date +%Y%m%d%H%M%S); \
+  else \
+    echo '[warn] 服务尚未安装，跳过 backup（首次部署）'; \
+  fi"
 
 # 2. 上传新二进制（不停服）
 ssh_run "mkdir -p /opt/y-sync/releases/$DEPLOY_VERSION /opt/y-sync/incoming"

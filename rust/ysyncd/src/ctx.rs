@@ -35,6 +35,8 @@ fn config_mtime() -> i64 {
 /// 以文件 mtime 判定；daemon 自身的游标落盘也会触发一次幂等重载。
 pub fn maybe_reload() {
     let ctx = ctx();
+    // 读盘和替换配置共用同一把锁，避免并行项目落盘后被旧快照覆盖。
+    let mut c = ctx.cfg.lock().unwrap();
     let mtime = config_mtime();
     {
         let mut last = ctx.last_load_mtime.lock().unwrap();
@@ -44,7 +46,6 @@ pub fn maybe_reload() {
         *last = mtime;
     }
     if let Ok(cfg) = ysync_core::load_config() {
-        let mut c = ctx.cfg.lock().unwrap();
         *c = cfg;
     }
 }
